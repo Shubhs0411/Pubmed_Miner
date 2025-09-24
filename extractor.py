@@ -1,10 +1,11 @@
 # extractor.py
 from __future__ import annotations
 
+import os
 import re
 import json
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any, List
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -13,260 +14,230 @@ from bs4 import BeautifulSoup
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 PMC_ARTICLE_URL = "https://pmc.ncbi.nlm.nih.gov/articles"
-HEADERS = {
-    "User-Agent": "PMID-FullText/1.0 (+mailto:you@example.com)",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+
+# Identify yourself to NCBI (recommended)
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "you@example.com")
+HEADERS_HTML = {
+    "User-Agent": f"SVF-PMC-Fetch/1.1 (+mailto:{CONTACT_EMAIL})"
 }
 
-# -------------------------
-# Robust HTTP session
-# -------------------------
-_SESSION = requests.Session()
-_RETRY = Retry(
-    total=6,
-    backoff_factor=0.6,                  # 0.6, 1.2, 2.4, ...
-    status_forcelist=(429, 500, 502, 503, 504),
-    allowed_methods=frozenset(["GET", "POST"]),
-    raise_on_status=False,
-)
-_ADAPTER = HTTPAdapter(max_retries=_RETRY)
-_SESSION.mount("https://", _ADAPTER)
-_SESSION.mount("http://", _ADAPTER)
+# ---------- Session with retries ----------
+def _make_session() -> requests.Session:
+    s = requests.Session()
+    retries = Retry(
+        total=5,
+        backoff_factor=0.6,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET", "HEAD"),
+        raise_on_status=False,
+    )
+    s.mount("https://", HTTPAdapter(max_retries=retries))
+    s.mount("http://", HTTPAdapter(max_retries=retries))
+    return s
 
-def _clean_space(s: str) -> str:
-    return re.sub(r"\s+", " ", s or "").strip()
+_SESS = _make_session()
 
-# >>> CHANGED: normalize troublesome unicode so quotes match PAPER_TEXT
-_UNICODE_NORMALIZATION_MAP = {
-    # quotes
-    "\u2018": "'", "\u2019": "'", "\u201C": '"', "\u201D": '"',
-    # dashes
-    "\u2013": "-", "\u2014": "-", "\u2212": "-",  # en/em/real minus
-    # spaces
-    "\u00A0": " ", "\u2009": " ", "\u202F": " ", "\u200A": " ", "\u200B": "",
-    # arrows
-    "\u2192": "->", "\u27F6": "->",
-}
-_UNICODE_TRANS = str.maketrans(_UNICODE_NORMALIZATION_MAP)
-
-def _normalize_text_for_ie(text: str) -> str:
-    """
-    Keep scientific tokens (Δ, Greek letters) intact, but normalize punctuation,
-    spaces, and arrows so the LLM's short quotes are more likely to be substrings.
-    """
-    if not text:
-        return text
-    t = text.translate(_UNICODE_TRANS)
-    # collapse excessive whitespace once more after replacements
-    return _clean_space(t)
-
-def _make_soup(html_text: str):
-    """
-    Build a BeautifulSoup object trying robust parsers in order:
-    lxml -> html5lib -> html.parser (stdlib).
-    Avoids hard dependency errors: 'Couldn't find a tree builder... lxml'.
-    """
-    for parser in ("lxml", "html5lib", "html.parser"):
-        try:
-            return BeautifulSoup(html_text, parser)
-        except Exception:
-            continue
-    # last resort
-    return BeautifulSoup(html_text, "html.parser")
-
-def _safe_get_json(url: str, params: dict, *, tries: int = 3, sleep_s: float = 0.7) -> dict:
-    """
-    GET JSON with retries + tolerant parsing to handle:
-      - control characters / stray bytes
-      - truncated/chunked responses
-      - 429/5xx with backoff
-    """
-    last_err = None
-    for attempt in range(1, tries + 1):
-        try:
-            r = _SESSION.get(url, params=params, headers={"User-Agent": HEADERS["User-Agent"], "Accept": "application/json"}, timeout=60)
-            if r.status_code >= 400:
-                ra = r.headers.get("Retry-After")
-                if ra:
-                    try:
-                        time.sleep(float(ra))
-                    except Exception:
-                        pass
-                r.raise_for_status()
-            txt = (r.text or "").replace("\x00", "")
-            return json.loads(txt, strict=False)
-        except Exception as e:
-            last_err = e
-            time.sleep(sleep_s * attempt)
-            continue
-    raise last_err
-
-# -------------------------
-# Core: PMID -> PMCID
-# -------------------------
-def pmid_to_pmcid(pmid: str) -> Optional[str]:
-    """Return PMCID for a PMID if it exists (free full text in PMC), else None."""
-    params = {
-        "dbfrom": "pubmed",
-        "db": "pmc",
-        "id": pmid,
-        "retmode": "json",
-        "tool": "pmid_fulltext_tool",
-        "email": "you@example.com",
-    }
-    # Optional API key via env: NCBI_API_KEY (if set by caller’s environment)
-    import os
+def _get_json(url: str, params: dict, tries: int = 3, sleep_s: float = 0.6) -> dict:
     api_key = os.getenv("NCBI_API_KEY")
     if api_key:
+        params = dict(params)
         params["api_key"] = api_key
+    last_exc = None
+    for i in range(tries):
+        try:
+            r = _SESS.get(url, params=params, timeout=30)
+            if r.status_code == 429:
+                time.sleep(sleep_s * (2 ** i))
+                continue
+            r.raise_for_status()
+            try:
+                return r.json()
+            except Exception:
+                # tolerate stray chars around JSON
+                txt = r.text
+                start, end = txt.find("{"), txt.rfind("}")
+                if start >= 0 and end > start:
+                    return json.loads(txt[start:end + 1])
+                raise
+        except Exception as e:
+            last_exc = e
+            time.sleep(sleep_s * (i + 1))
+    raise last_exc or RuntimeError("EUtils request failed")
 
-    data = _safe_get_json(f"{EUTILS}/elink.fcgi", params=params)
-    # Typical structures:
-    # data["linksets"][0]["linksetdbs"][0]["links"] -> ["1234567", ...]  # then PMCID = "PMC" + id
+# ---------- PMID <-> PMCID mapping ----------
+def pmid_to_pmcid(pmid: str) -> Optional[str]:
+    """Exact mapping via ELink pubmed->pmc. Returns 'PMCxxxx' or None."""
+    j = _get_json(f"{EUTILS}/elink.fcgi", {
+        "dbfrom": "pubmed", "db": "pmc", "id": pmid, "retmode": "json", "tool": "svf_pmc_mapper", "email": CONTACT_EMAIL
+    })
     try:
-        linksets = data.get("linksets", []) or []
-        if not linksets:
-            return None
-        dbs = (linksets[0].get("linksetdbs") or [])
-        if not dbs:
-            return None
-        links = dbs[0].get("links") or []
-        if links:
-            return f"PMC{links[0]}"
+        linksets = j["linksets"][0].get("linksetdbs", [])
+        for ls in linksets:
+            if ls.get("dbto") == "pmc":
+                links = ls.get("links") or []
+                if links:
+                    return "PMC" + str(links[0])
     except Exception:
         pass
     return None
 
-# -------------------------
-# Helpers for HTML pruning
-# -------------------------
+def pmcid_to_pmid(pmcid: str) -> Optional[str]:
+    """Reverse mapping to validate that a PMCID belongs to the PMID we think it does."""
+    pmcid_num = re.sub(r"^PMC", "", str(pmcid))
+    j = _get_json(f"{EUTILS}/elink.fcgi", {
+        "dbfrom": "pmc", "db": "pubmed", "id": pmcid_num, "retmode": "json", "tool": "svf_pmc_mapper", "email": CONTACT_EMAIL
+    })
+    try:
+        linksets = j["linksets"][0].get("linksetdbs", [])
+        for ls in linksets:
+            if ls.get("dbto") == "pubmed":
+                links = ls.get("links") or []
+                if links:
+                    return str(links[0])
+    except Exception:
+        pass
+    return None
 
-# >>> CHANGED: labels we should remove to avoid background/noise
-_SECTION_KILLWORDS = {
-    "references", "reference", "footnotes", "acknowledgements", "acknowledgments",
-    "author contributions", "authors' information", "funding", "ethics",
-    "competing interests", "conflict of interest", "supplementary", "supporting information",
-}
+# ---------- PubMed HTML helpers (embargo & publisher links) ----------
+_EMBARGO_RE = re.compile(r"PMCID:\s*PMC\d+\s*\(available on\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\)", re.I)
 
-def _has_killword(text: str) -> bool:
-    if not text:
-        return False
-    t = text.strip().lower()
-    return any(kw in t for kw in _SECTION_KILLWORDS)
+def _pubmed_embargo_date_for_pmid(pmid: str) -> Optional[str]:
+    """Find 'PMCID: PMCxxxx (available on YYYY-MM-DD)' on the PubMed HTML page."""
+    url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+    r = _SESS.get(url, headers=HEADERS_HTML, timeout=30)
+    if r.status_code == 200:
+        m = _EMBARGO_RE.search(r.text)
+        if m:
+            return m.group(1)
+    return None
 
-def _prune_noise(main) -> None:
+def get_publisher_links(pmid: str) -> Dict[str, Any]:
     """
-    Remove obvious chrome and back matter (refs, footnotes, acknowledgements, etc.).
+    Returns DOI, publisher_url, and if configured with UNPAYWALL_EMAIL, publisher_free_url + is_publisher_oa.
     """
-    # Remove generic chrome
-    for sel in ["nav", "header", "footer", "aside", "script", "style",
-                ".ncbi-alerts", ".page-header", ".page-navbar"]:
-        for node in main.select(sel):
-            try:
-                node.decompose()
-            except Exception:
-                pass
+    out: Dict[str, Any] = {"doi": None, "publisher_url": None, "publisher_free_url": None, "is_publisher_oa": None}
+    # ESummary for DOI
+    try:
+        j = _get_json(f"{EUTILS}/esummary.fcgi", {"db": "pubmed", "id": pmid, "retmode": "json"})
+        rec = j["result"][str(pmid)]
+        for aid in rec.get("articleids", []):
+            if aid.get("idtype") == "doi":
+                out["doi"] = aid.get("value")
+                break
+    except Exception:
+        pass
+    # PubMed HTML to get "Full text" publisher link if present
+    try:
+        html = _SESS.get(f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/", headers=HEADERS_HTML, timeout=30).text
+        m = re.search(r'href="(https?://[^"]+)"[^>]*>\s*(?:Full text|Publisher)\s*', html, re.I)
+        if m:
+            out["publisher_url"] = m.group(1)
+    except Exception:
+        pass
 
-    # Remove sections by heading text (e.g., <h2>References</h2> and following siblings if grouped)
-    for h in main.find_all(["h2", "h3", "h4"]):
+    # Optional: Unpaywall
+    email = os.getenv("UNPAYWALL_EMAIL")
+    if out["doi"] and email:
         try:
-            if _has_killword(h.get_text(" ", strip=True)):
-                # If the heading parent is a section-ish container, drop that container; else drop heading and next siblings until next heading.
-                parent = h.find_parent(lambda tag: tag.name in {"section", "div", "article"} and len(tag.find_all(["h2","h3"], recursive=False)) <= 1)
-                if parent:
-                    parent.decompose()
-                else:
-                    h.decompose()
+            u = f"https://api.unpaywall.org/v2/{out['doi']}"
+            r = _SESS.get(u, params={"email": email}, timeout=30)
+            if r.status_code == 200:
+                upw = r.json()
+                out["is_publisher_oa"] = bool(upw.get("is_oa"))
+                best = upw.get("best_oa_location") or {}
+                if best.get("url"):
+                    out["publisher_free_url"] = best["url"]
         except Exception:
             pass
+    return out
 
-    # Remove elements by id/class heuristics
-    for el in list(main.find_all(True)):
-        try:
-            idtxt = " ".join([el.get("id",""), *el.get("class", [])]).lower()
-            if any(kw in idtxt for kw in ["ref-list", "references", "footnote", "acknowledg", "supplement"]):
-                el.decompose()
-        except Exception:
-            pass
-
-# -------------------------
-# Parse PMC HTML to text
-# -------------------------
-def _parse_main_and_title(html: str) -> Tuple[str, Optional[str]]:
-    soup = _make_soup(html)
+# ---------- PMC fetch & HTML->text ----------
+def _html_to_text_and_title(html: str) -> Tuple[str, Optional[str]]:
+    soup = BeautifulSoup(html, "html.parser")
 
     # Title
     title = None
-    og = soup.find("meta", attrs={"property": "og:title"})
-    if og and og.get("content"):
-        title = _clean_space(og["content"])
-    if not title:
-        h1 = soup.find("h1")
-        if h1:
-            title = _clean_space(h1.get_text(" ", strip=True))
+    t_el = soup.find(["h1", "title"])
+    if t_el:
+        title = t_el.get_text(strip=True)
 
-    # Main content area (PMC uses #maincontent but fallback to <main> or whole doc)
-    main = soup.find(id="maincontent") or soup.find("main") or soup
+    # Prefer the article content region on PMC pages
+    article = soup.find("article")
+    main = article or soup.find(id="maincontent") or soup
 
-    # >>> CHANGED: aggressive pruning of noise/back matter
-    _prune_noise(main)
+    # Remove nav/figures/scripts/references sidebars
+    for sel in [
+        "nav", "header", "footer", "script", "style",
+        ".fig", ".figures", ".fig-popup", ".figure-viewer",
+        ".tsec", ".table-wrap", ".sidebar", ".ref-list", ".references"
+    ]:
+        for n in main.select(sel):
+            n.decompose()
 
-    # Prefer body-like blocks that carry scientific content
-    parts = []
-    for tag in main.find_all(["h1","h2","h3","h4","p","li","td","th","caption"]):
-        txt = tag.get_text(" ", strip=True)
-        if txt:
-            parts.append(txt)
-
-    text = _clean_space(" ".join(parts))
-
-    # >>> CHANGED: normalize unicode so the LLM’s quotes match this text
-    text = _normalize_text_for_ie(text)
-
+    text = " ".join(main.get_text(separator=" ", strip=True).split())
     return text, title
 
 def fetch_pmc_html_text_and_title(pmcid: str, retries: int = 3) -> Tuple[str, Optional[str]]:
     """
-    Fetch PMC article HTML and parse to (text, title).
-    Retries and cools down on 403 (rate-limit / access throttle).
+    Fetch PMC HTML for an article ID like 'PMC5925603' and return (plain_text, title).
+    Raises RuntimeError('pmc_embargo_or_blocked') on 403, or RuntimeError with status on other failures.
     """
-    last_err = None
-    for attempt in range(1, retries + 1):
-        try:
-            r = _SESSION.get(f"{PMC_ARTICLE_URL}/{pmcid}/", headers=HEADERS, timeout=60)
-            # 403 handling: throttle & retry
-            if r.status_code == 403:
-                # polite cool-down (grows with attempts)
-                time.sleep(4.0 * attempt)
-                last_err = requests.HTTPError(f"403 Forbidden for {pmcid}")
-                continue
-            r.raise_for_status()
-            return _parse_main_and_title(r.text)
-        except Exception as e:
-            last_err = e
-            # backoff for other transient errors
-            time.sleep(0.6 * attempt)
+    url = f"{PMC_ARTICLE_URL}/{pmcid}/"
+    last_status = None
+    for i in range(retries):
+        r = _SESS.get(url, headers=HEADERS_HTML, timeout=45)
+        last_status = r.status_code
+        if r.status_code == 200:
+            return _html_to_text_and_title(r.text)
+        if r.status_code == 403:
+            # Don’t retry forever; likely embargo/robots block
+            raise RuntimeError("pmc_embargo_or_blocked")
+        if r.status_code in (429, 502, 503, 504):
+            time.sleep(0.7 * (2 ** i))
             continue
-    # Give up
-    raise last_err if last_err else RuntimeError(f"Failed to fetch PMC article for {pmcid}")
+        r.raise_for_status()
+    raise RuntimeError(f"pmc_fetch_failed status={last_status}")
 
-# -------------------------
-# Public API (unchanged signatures)
-# -------------------------
+# ---------- Public: fetch with mapping/embargo/OA metadata ----------
 def get_pmc_fulltext_with_meta(pmid: str) -> Tuple[Optional[str], str, Optional[str]]:
     """
-    Given a PMID, return (PMCID, full_text, title). PMCID may be None if not found.
+    Returns (pmcid, text, title). If no PMCID, text='' and title=None.
+    - Validates pmcid<->pmid to avoid wrong-article 403s.
+    - If PMC blocks with embargo (403), returns empty text but keeps pmcid so you can show embargo info via `_pubmed_embargo_date_for_pmid`.
     """
     pmcid = pmid_to_pmcid(pmid)
     if not pmcid:
+        # No PMC – nothing to fetch here.
         return None, "", None
-    text, title = fetch_pmc_html_text_and_title(pmcid)
-    return pmcid, text, title
+
+    # sanity: ensure pmcid maps back to this pmid (avoid mismatched PMCID)
+    back = pmcid_to_pmid(pmcid)
+    if back and str(back) != str(pmid):
+        # Wrong PMCID for this PMID – treat as not in PMC for safety
+        return None, "", None
+
+    try:
+        text, title = fetch_pmc_html_text_and_title(pmcid)
+        return pmcid, text, title
+    except RuntimeError as e:
+        if "pmc_embargo_or_blocked" in str(e):
+            # PMC exists but access blocked (often embargo). Surface empty text; callers can show embargo date using helper.
+            return pmcid, "", None
+        raise
 
 def get_pmc_fulltext(pmid: str) -> Tuple[Optional[str], str]:
     """
-    Back-compat wrapper: return (PMCID, full_text). Title omitted here.
+    Back-compat wrapper: return (PMCID, full_text). Title omitted.
     """
     pmcid, text, _title = get_pmc_fulltext_with_meta(pmid)
     return pmcid, text
 
+# ---------- Optional helper for your UI (publisher fallback when no PMC) ----------
+def get_free_publisher_fallback(pmid: str) -> Dict[str, Any]:
+    """
+    If an article is not in PMC, use PubMed + Unpaywall to report publisher access:
+      { 'doi', 'publisher_url', 'publisher_free_url', 'is_publisher_oa', 'embargo_until' }
+    """
+    info = get_publisher_links(pmid)
+    info["embargo_until"] = _pubmed_embargo_date_for_pmid(pmid)
+    return info

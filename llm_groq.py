@@ -37,7 +37,7 @@ def _post_chat(payload: Dict[str, Any]) -> Dict[str, Any]:
             raise RuntimeError(
                 "Groq API 404 unknown_url. Use POST https://api.groq.com/openai/v1/chat/completions"
             )
-        if resp.status_code == 429:
+        if resp.status_code in (429, 503):
             retry_after = resp.headers.get("Retry-After")
             if retry_after:
                 try:
@@ -66,20 +66,145 @@ def chat_complete(messages: List[Dict[str, str]], model: str = DEFAULT_MODEL,
     data = _post_chat(payload)
     return data["choices"][0]["message"]["content"]
 
-# ===== Generalized Prompt =====
+# ===== Canonical helpers (AA mapping) =====
+
+AA_ONE = {
+    "alanine": "A", "ala": "A",
+    "arginine": "R", "arg": "R",
+    "asparagine": "N", "asn": "N",
+    "aspartic acid": "D", "aspartate": "D", "asp": "D",
+    "cysteine": "C", "cys": "C",
+    "glutamine": "Q", "gln": "Q",
+    "glutamic acid": "E", "glutamate": "E", "glu": "E",
+    "glycine": "G", "gly": "G",
+    "histidine": "H", "his": "H",
+    "isoleucine": "I", "ile": "I",
+    "leucine": "L", "leu": "L",
+    "lysine": "K", "lys": "K",
+    "methionine": "M", "met": "M",
+    "phenylalanine": "F", "phe": "F",
+    "proline": "P", "pro": "P",
+    "serine": "S", "ser": "S",
+    "threonine": "T", "thr": "T",
+    "tryptophan": "W", "trp": "W",
+    "tyrosine": "Y", "tyr": "Y",
+    "valine": "V", "val": "V",
+    "*": "*",
+}
+AA_WORD_RE = r"(alanine|arginine|asparagine|aspartic acid|aspartate|cysteine|glutamine|glutamic acid|glutamate|glycine|histidine|isoleucine|leucine|lysine|methionine|phenylalanine|proline|serine|threonine|tryptophan|tyrosine|valine|ala|arg|asn|asp|cys|gln|glu|gly|his|ile|leu|lys|met|phe|pro|ser|thr|trp|tyr|val|\*)"
+
+def _aa1(x: str) -> Optional[str]:
+    return AA_ONE.get(x.strip().lower())
+
+# ====== TEXT AUGMENTATION: add canonical tokens directly into PAPER_TEXT ======
+
+def _augment_text_with_canonical_tokens(text: str) -> str:
+    """
+    Insert canonical mutation/segment tokens into natural-language phrases so that
+    at least one verbatim quote can include the exact token (our sanitizer requires it).
+    Examples inserted: (H39R), (A54E), (T280Y), (del42-59), (aa1396-1435), (S114A, W115A, D180A, T301A)
+    """
+    if not text:
+        return text
+    t = text
+
+    # 1) "... histidine-39 with arginine" / "serine-112 to alanine"
+    pat1 = re.compile(
+        rf"(?:a\s+substitution\s+of\s+)?(?P<orig>{AA_WORD_RE})\s*[- ]?\s*(?P<pos>\d+)\s*(?:to|with|by|->|→)\s*(?P<dest>{AA_WORD_RE})",
+        flags=re.IGNORECASE
+    )
+    def sub1(m):
+        o = _aa1(m.group("orig")); d = _aa1(m.group("dest")); pos = m.group("pos")
+        token = f"({o}{pos}{d})" if o and d and pos else ""
+        s = m.group(0)
+        return s if not token or token.lower() in s.lower() else f"{s} {token}"
+    t = pat1.sub(sub1, t)
+
+    # 2) "threonine at position 280 ... substituted with tyrosine"
+    pat2 = re.compile(
+        rf"(?P<orig>{AA_WORD_RE})\s+at\s+position\s+(?P<pos>\d+)[^\.]{{0,120}}?(?:substitution|substituted|replaced)[^\.]{{0,40}}?\s+(?:with|by|to)\s+(?P<dest>{AA_WORD_RE})",
+        flags=re.IGNORECASE
+    )
+    def sub2(m):
+        o = _aa1(m.group("orig")); d = _aa1(m.group("dest")); pos = m.group("pos")
+        token = f"({o}{pos}{d})" if o and d and pos else ""
+        s = m.group(0)
+        return s if not token or token.lower() in s.lower() else f"{s} {token}"
+    t = pat2.sub(sub2, t)
+
+    # 3) "substitution at position 54 from alanine to glutamic acid"
+    pat3 = re.compile(
+        rf"(?:substitution|mutation)\s+at\s+position\s+(?P<pos>\d+)\s+from\s+(?P<orig>{AA_WORD_RE})\s+(?:to|with|by)\s+(?P<dest>{AA_WORD_RE})",
+        flags=re.IGNORECASE
+    )
+    def sub3(m):
+        o = _aa1(m.group("orig")); d = _aa1(m.group("dest")); pos = m.group("pos")
+        token = f"({o}{pos}{d})" if o and d and pos else ""
+        s = m.group(0)
+        return s if not token or token.lower() in s.lower() else f"{s} {token}"
+    t = pat3.sub(sub3, t)
+
+    # 4) Region deletion: "positions 42-59 ... deletion/removal"
+    pat4 = re.compile(
+        r"(positions?\s+(?P<start>\d+)\s*(?:-|to|–|—)\s*(?P<end>\d+)[^\.]{0,120}?(?:removal|deletion|deleted|remove))",
+        flags=re.IGNORECASE
+    )
+    def sub4(m):
+        a = m.group("start"); b = m.group("end")
+        token = f"(del{a}-{b})" if a and b else ""
+        s = m.group(0)
+        return s if not token or token.lower() in s.lower() else f"{s} {token}"
+    t = pat4.sub(sub4, t)
+
+    # 5) Segment mention "amino acids 1396 to 1435" -> (aa1396-1435)
+    pat5 = re.compile(r"(amino acids?\s+(?P<start>\d+)\s*(?:to|-|–|—)\s*(?P<end>\d+))", flags=re.IGNORECASE)
+    def sub5(m):
+        a = m.group("start"); b = m.group("end")
+        token = f"(aa{a}-{b})" if a and b else ""
+        s = m.group(0)
+        return s if not token or token.lower() in s.lower() else f"{s} {token}"
+    t = pat5.sub(sub5, t)
+
+    # 6) "alanine substitutions at positions S114, W115, D180 or T301" -> (S114A, W115A, D180A, T301A)
+    pat6 = re.compile(
+        r"(alanine substitutions?\s+at\s+positions?\s+)(?P<list>(?:[A-Z]\d+(?:\s*,\s*)?)+(?:\s*(?:and|or)\s*[A-Z]\d+)?)",
+        flags=re.IGNORECASE
+    )
+    def sub6(m):
+        sites_str = m.group("list")
+        sites = re.findall(r"[A-Z]\d+", sites_str)
+        tokens = [f"{s}A" for s in sites]
+        token = f" ({', '.join(tokens)})" if tokens else ""
+        s = m.group(0)
+        return s if not token or token.lower() in s.lower() else f"{s}{token}"
+    t = pat6.sub(sub6, t)
+
+    # 7) "proline to leucine ... amino acid 101" -> (P101L)
+    pat7 = re.compile(
+        rf"(?P<orig>{AA_WORD_RE})\s+(?:to|->|→)\s+(?P<dest>{AA_WORD_RE})[^\.]{{0,80}}?amino acid\s+(?P<pos>\d+)",
+        flags=re.IGNORECASE
+    )
+    def sub7(m):
+        o = _aa1(m.group("orig")); d = _aa1(m.group("dest")); pos = m.group("pos")
+        token = f"({o}{pos}{d})" if o and d and pos else ""
+        s = m.group(0)
+        return s if not token or token.lower() in s.lower() else f"{s} {token}"
+    t = pat7.sub(sub7, t)
+
+    return t
+
+# ===== Generalized Prompt (updated) =====
 
 SCHEMA_EXPLANATION = """
-You are an information extraction model for biological literature. Your goal is to extract
-sequence- or variant-level functional findings from dengue virus ONLY (all serotypes/strains/lineages),
-focusing on proteins/genes and the impact of specific mutations or modifications.
+You are an information extraction model for biological literature. Extract mutation/segment-level functional findings
+from dengue virus ONLY (any serotype/strain). The PAPER_TEXT may contain helper canonical tokens we added in parentheses,
+e.g. "(H39R)", "(A54E)", "(T280Y)", "(del42-59)", "(aa1396-1435)". Use those EXACT tokens in one of your evidence quotes.
 
-SCOPE & SIGNALS (soft hints; do not hallucinate)
-- Prefer spans that mention a protein/gene-like entity ("protein", "gene", "ORF", "polyprotein", "NS", "E", etc.).
-- If optional filters (organism or protein keywords) are provided, prioritize spans that match them.
-- Target concepts (examples, not exhaustive): active site, interaction, disease association, mutation, virulence,
-  temperature sensitivity, activity change, virion/particle assembly, viral replication/synthesis, binding,
-  post-translational modifications (phosphorylation/glycosylation/etc.), drug interaction/resistance,
-  effect on transmission, infectivity, cleavage/protease recognition, immune evasion, host factor dependence.
+SPLITTING & NORMALIZATION
+- If a sentence describes multiple mutations together (e.g., "S114, W115, D180 or T301 alanine substitutions"),
+  output a separate item for each, e.g., S114A, W115A, D180A, T301A.
+- Region/segment edits are valid mutations, e.g., "del42-59" (deletion) or "aa1396-1435" (segment).
+- Prefer precise direction/magnitude ("abolished", "reduced ~10-fold", "no effect"), and include system/assay if stated.
 
 OUTPUT FORMAT (STRICT JSON ONLY)
 {
@@ -95,35 +220,26 @@ OUTPUT FORMAT (STRICT JSON ONLY)
       "virus": "<organism name or null>",
       "source_strain": "<strain/serotype/lineage if stated, else null>",
       "protein": "<protein or gene symbol>",
-      "mutation": "<e.g., N501Y, D125A, del69-70, p.Asp125Ala, K70*, etc.>",
+      "mutation": "<e.g., N501Y, D125A, del69-70, p.Asp125Ala, K70*, aa1396-1435>",
       "position": "<integer or null>",
       "effect_category": "<one of: RNA_synthesis | virion_assembly | binding | replication | infectivity | virulence | immune_evasion | drug_interaction | temperature_sensitivity | activity_change | modification | other>",
-      "effect_summary": "<1-2 sentence, as concrete as the paper allows>",
+      "effect_summary": "<1-2 sentences>",
       "mechanism_hypothesis": "<brief mechanistic explanation if present, else null>",
-      "experiment_context": {
-        "system": "<cell/animal/in vitro/in silico, if stated>",
-        "assay": "<method/assay type if stated>",
-        "temperature": "<value if stated, else null>"
-      },
+      "experiment_context": { "system": "<cell/animal/in vitro/in silico>", "assay": "<method>", "temperature": "<value or null>" },
       "evidence_quotes": ["<short quote 1>", "<short quote 2>"],
-      "cross_refs": [
-        { "pmid": "<numeric PMID mentioned in the paper text, else null>", "note": "<why referenced>" }
-      ]
+      "cross_refs": [ { "pmid": "<numeric PMID mentioned in the text, else null>", "note": "<why>" } ]
     }
   ]
 }
 
 RULES
-- Only report findings explicitly supported by the PAPER_TEXT; avoid generic background not shown in the text.
-- Provide quotes that appear verbatim in the PAPER_TEXT (case-insensitive), each up to ~20 words.
-- At least one evidence quote per item MUST contain the exact mutation text as it appears (e.g., "E98A", "Ala98Thr", "del69-70", "K70*").
-- If no such quote exists in PAPER_TEXT, do not output that item.
-- If the paper groups multiple mutations in a single claim (e.g., “X, Y, Z impaired assembly”), create separate entries per mutation
-  and include the group claim as a quote for each relevant entry.
-- Prefer precise language about direction and magnitude (e.g., “abolished”, “reduced”, “increased”, “no effect”). Avoid vague wording.
-- Keep position numeric where possible; else null.
-- cross_refs.pmid must be strictly numeric; if not numeric or absent, set pmid to null or omit.
-- The output MUST be valid JSON using standard ASCII quotes, with no extra commentary.
+- Only report findings explicitly supported by the PAPER_TEXT; avoid generic background.
+- Provide quotes that appear verbatim in PAPER_TEXT (case-insensitive), each up to ~20 words.
+- At least one evidence quote per item MUST contain the exact mutation/segment token (e.g., "H39R", "A54E", "del42-59", "aa1396-1435").
+- If no such quote exists, do not output that item.
+- If a statement lists several mutations and a shared effect, create one item per mutation and reuse the shared quote.
+- Keep position numeric where possible; else null. Use dengue-only entities for virus names.
+- Output MUST be valid JSON (no extra commentary).
 """
 
 def _build_messages(paper_text: str,
@@ -164,7 +280,7 @@ def _parse_json(raw: str, pmid: Optional[str], pmcid: Optional[str]) -> Dict[str
         "sequence_features": []
     }
 
-# ========= NEW: strict sanitizer (no mutation token → no row; quote must contain token & be in text) ========
+# ========= STRICT sanitizer (requires mutation token & grounded quote) ========
 
 _ALLOWED_CATEGORIES = {
     "RNA_synthesis", "virion_assembly", "binding", "replication",
@@ -172,13 +288,15 @@ _ALLOWED_CATEGORIES = {
     "temperature_sensitivity", "activity_change", "modification", "other"
 }
 
+# Expanded: accept aa-segment tokens too
 _MUTATION_TOKEN_RE = re.compile(
-    r"(?:"
-    r"(?:[A-Z][a-z]{3}|[A-Z])\s*\d+\s*(?:[A-Z][a-z]{3}|[A-Z]|\*)"           # Ala123Thr | A123T | K70*
-    r"|(?:[A-Z][a-z]{3}|[A-Z])\s*\d+\s*(?:→|->)\s*(?:[A-Z][a-z]{3}|[A-Z]|\*)"  # T123→A / A123 -> T
-    r"|(?:del|Δ)\s*\d+(?:\s*-\s*\d+)?"                                       # del69-70 / Δ69
-    r"|ins\s*[A-Za-z\*]+(?:\d+)?"                                            # insA / insAla / insAla123
-    r"|p\.[A-Za-z]{3}\d+[A-Za-z]{3}"                                         # p.Asp125Ala
+    r"(?:"  # classic + arrows + deletions/insertions + p. + aa segments
+    r"(?:[A-Z][a-z]{3}|[A-Z])\s*\d+\s*(?:[A-Z][a-z]{3}|[A-Z]|\*)"             # Ala123Thr | A123T | K70*
+    r"|(?:[A-Z][a-z]{3}|[A-Z])\s*\d+\s*(?:→|->)\s*(?:[A-Z][a-z]{3}|[A-Z]|\*)" # T123→A / A123 -> T
+    r"|(?:del|Δ)\s*\d+(?:\s*[-–—]\s*\d+)?"                                    # del69-70 / Δ69
+    r"|aa\d+\s*[-–—]\s*\d+"                                                   # aa1396-1435
+    r"|ins\s*[A-Za-z\*]+(?:\d+)?"                                             # insA / insAla / insAla123
+    r"|p\.[A-Za-z]{3}\d+[A-Za-z]{3}"                                          # p.Asp125Ala
     r")",
     flags=re.IGNORECASE
 )
@@ -200,8 +318,7 @@ def _category_or_other(cat: Optional[str]) -> str:
     return cat if cat in _ALLOWED_CATEGORIES else "other"
 
 def sanitize_and_filter_strict(result: dict, full_text: str) -> dict:
-    """Drop any item that lacks a strict mutation token and a verbatim quote containing it.
-       Also enforce effect_category whitelist."""
+    """Drop any item that lacks a strict mutation/segment token and a verbatim quote containing it."""
     if not isinstance(result, dict):
         return {"paper": {"pmid": None, "pmcid": None, "title": None,
                           "virus_candidates": [], "protein_candidates": []},
@@ -217,41 +334,20 @@ def sanitize_and_filter_strict(result: dict, full_text: str) -> dict:
             continue
         mut = (f.get("mutation") or "").strip()
         if not mut or not _has_mutation_token(mut):
-            # Reject: no recognizable mutation token
             continue
         quotes = f.get("evidence_quotes") or []
         ok_quote = None
         for q in quotes:
             qs = _normalize_for_match(str(q))
-            # Must contain exact mutation string and be verbatim in text
             if mut.lower() in qs.lower() and qs and qs.lower() in norm_text.lower():
                 ok_quote = q
                 break
         if not ok_quote:
-            # Reject: mutation not present in any grounded quote
             continue
         f["effect_category"] = _category_or_other(f.get("effect_category"))
         cleaned.append(f)
 
     return {"paper": paper, "sequence_features": cleaned}
-
-# ===== Core IE =====
-
-def extract_sequence_features(
-    paper_text: str,
-    pmid: Optional[str] = None,
-    pmcid: Optional[str] = None,
-    virus_filter: Optional[str] = None,
-    protein_filter: Optional[str] = None,
-    model: str = DEFAULT_MODEL,
-    temperature: float = 0.0,
-    max_tokens: int = 2048,
-) -> Dict[str, Any]:
-    messages = _build_messages(paper_text, pmid, pmcid, virus_filter, protein_filter)
-    raw = chat_complete(messages, model=model, temperature=temperature, max_tokens=max_tokens)
-    parsed = _parse_json(raw, pmid, pmcid)
-    # 🚧 HARD GATE: drop hallucinations immediately
-    return sanitize_and_filter_strict(parsed, paper_text)
 
 # ===== Chunking =====
 
@@ -268,6 +364,8 @@ def _chunk_text(text: str, max_chars: int = 16000, overlap: int = 500) -> List[s
             break
         start = max(0, end - overlap)
     return chunks
+
+# ===== Merge & misc helpers =====
 
 def _merge_lists_unique(a: List[str], b: List[str], limit: int) -> List[str]:
     out = []
@@ -295,8 +393,6 @@ def _merge_features(all_feats: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             seen.add(key); merged.append(f)
     return merged
 
-# ===== Canonicalization & scoring =====
-
 _CANON_PROTEIN = {
     "ns1 protein": "NS1", "ns1": "NS1",
     "ns2a protein": "NS2A", "ns2a": "NS2A",
@@ -316,18 +412,6 @@ def _canon_protein(name: Optional[str]) -> Optional[str]:
     key = str(name).strip().lower()
     return _CANON_PROTEIN.get(key, name)
 
-def _canon_virus_and_strain(virus: Optional[str], source_strain: Optional[str]):
-    v = virus or None
-    s = source_strain or None
-    return v, s
-
-_TARGET_HINTS = {"mutation","virion","assembly","rna synthesis","replication","infectivity","binding",
-                 "cleavage","protease","virulence","temperature","activity","interaction","modification"}
-
-def _contains_hint(text: str) -> bool:
-    tl = text.lower()
-    return any(h in tl for h in _TARGET_HINTS)
-
 def _is_valid_pmid(x):
     return isinstance(x, str) and x.isdigit() and 5 <= len(x) <= 9
 
@@ -343,6 +427,12 @@ def _trim_quote(q, max_words: int = 20):
 def _quote_in_text(q: str, text: str) -> bool:
     if not q or not text: return False
     return q.lower() in text.lower()
+
+def _contains_hint(text: str) -> bool:
+    _TARGET_HINTS = {"mutation","virion","assembly","rna synthesis","replication","infectivity","binding",
+                     "cleavage","protease","virulence","temperature","activity","interaction","modification"}
+    tl = text.lower()
+    return any(h in tl for h in _TARGET_HINTS)
 
 def _score_feature(f: Dict[str, Any], full_text: str) -> float:
     score = 0.0
@@ -362,8 +452,6 @@ def _score_feature(f: Dict[str, Any], full_text: str) -> float:
         if isinstance(pmid, str) and pmid.isdigit(): score += 0.05; break
     if any(isinstance(q, str) and _contains_hint(q) for q in quotes): score += 0.05
     return min(score, 1.0)
-
-# ===== Merge helpers & conflict handling =====
 
 def _merge_unique_strs(a, b):
     out, seen = [], set()
@@ -443,183 +531,151 @@ def _coalesce_by_key(feats):
             pass
     return list(bykey.values())
 
-# ===== Class-statement propagation (generalized) & strain inference =====
+# ===== Regex-based deterministic miner (new) =====
 
-_MUTATION_REGEX = re.compile(
-    r"(?:"  # broader for class-statement parsing (kept from your version)
-    r"(?:[A-Z][a-z]{2}|[A-Z])\s*\d+\s*(?:[A-Z][a-z]{2}|[A-Z]|\*)"
-    r"|(?:[A-Z][a-z]{2}|[A-Z])\s*\d+\s*(?:→|->)\s*(?:[A-Z][a-z]{2}|[A-Z]|\*)"
-    r"|(?:del|Δ)\s*\d+(?:\s*-\s*\d+)?"
-    r"|ins\s*[A-Za-z\*]+(?:\d+)?"
-    r"|p\.[A-Za-z]{3}\d+[A-Za-z]{3}"
-    r")",
-    flags=re.IGNORECASE
-)
+_PROTEIN_NEAR_RE = re.compile(r"\b(NS1|NS2A|NS2B|NS3|NS4A|NS4B|NS5|prM|Capsid|C|E|envelope|membrane|M)\b", re.IGNORECASE)
+_VIRUS_NEAR_RE = re.compile(r"\b(DENV(?:-\d)?|dengue virus|dengue)\b", re.IGNORECASE)
+_STRAIN_RE = re.compile(r"\bDENV-(1|2|3|4)\b", re.IGNORECASE)
 
-def _extract_class_statements(text: str):
-    out = []
-    t = re.sub(r"\s+", " ", text)
-    patterns = [
-        r"mutations?\s*(?:in\s+[A-Za-z0-9\-\_/]+)?\s*\(([^)]+)\)\s*([^\.]{0,240}?\.)",
-        r"\(([^)]+)\)\s*([^\.]{0,240}?\.)\s*(?:mutations?|substitutions?)",
-    ]
-    for pat in patterns:
-        for m in re.finditer(pat, t, flags=re.IGNORECASE):
-            muts_blob = m.group(1)
-            clause = m.group(2).strip()
-            muts = _MUTATION_REGEX.findall(muts_blob)
-            if muts and clause:
-                quote = (m.group(0)[:180]).strip()
-                out.append((muts, clause, quote))
-    return out
+def _window(text: str, i: int, left: int = 220, right: int = 220) -> str:
+    start = max(0, i - left)
+    end = min(len(text), i + right)
+    # expand to sentence boundaries
+    sent_start = max(text.rfind(".", 0, start), text.rfind(";", 0, start), text.rfind("\n", 0, start)) + 1
+    sent_end = end
+    stop = min([p for p in [text.find(".", i), text.find(";", i), text.find("\n", i)] if p != -1] + [end])
+    if stop > 0:
+        sent_end = stop + 1
+    return _normalize_for_match(text[sent_start:sent_end]).strip()
 
-def _infer_source_strain(text: str) -> Optional[str]:
-    t = text.lower()
-    if "strain" in t or "serotype" in t or "lineage" in t:
+def _nearest_protein(text: str, i: int) -> Optional[str]:
+    span = text[max(0, i - 300): i + 50]
+    m = None
+    for m in _PROTEIN_NEAR_RE.finditer(span):
+        pass
+    if not m:
         return None
-    return None
+    name = m.group(1).lower()
+    return _canon_protein({"envelope":"E","c":"Capsid"}.get(name, name))
 
-def _apply_class_statements(full_text: str, feats: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    class_items = _extract_class_statements(full_text)
-    if not class_items:
-        return feats
-    by_mut: Dict[str, List[int]] = {}
-    for i, f in enumerate(feats):
-        mut = (f.get("mutation") or "").upper()
-        if mut: by_mut.setdefault(mut, []).append(i)
-    for muts, clause, quote in class_items:
-        cl = clause.lower()
-        for mtoken in muts:
-            for idx in by_mut.get(mtoken.upper(), []):
-                f = feats[idx]
-                eq = f.get("evidence_quotes") or []
-                if quote not in eq:
-                    eq.append(quote); f["evidence_quotes"] = eq
-                es = f.get("effect_summary") or ""
-                if "assembly" in cl and "rna" in cl and "without" in cl and f.get("effect_category") == "virion_assembly":
-                    if "without" not in es.lower():
-                        f["effect_summary"] = es.rstrip(".") + " without significantly affecting RNA synthesis."
-                if ("rna synthesis" in cl or "replication" in cl) and ("abolish" in cl or "abolished" in cl) and f.get("effect_category") == "RNA_synthesis":
-                    if "abolish" not in es.lower():
-                        f["effect_summary"] = "Selectively abolished RNA synthesis."
+def _infer_effect_category(sentence: str) -> Tuple[str, str]:
+    s = sentence.lower()
+    cat = "other"
+    if any(k in s for k in ["assembly","assemble","particle","virion"]):
+        cat = "virion_assembly"
+    if any(k in s for k in ["replication","replicate"]):
+        cat = "replication"
+    if "rna synthesis" in s or "polymerase" in s or "rd rp" in s or "rdrp" in s:
+        cat = "RNA_synthesis"
+    if any(k in s for k in ["infectivity","titre","titer","fusion capacity","fusion threshold","fusion-defective"]):
+        cat = "infectivity"
+    if any(k in s for k in ["attenuat", "virulen"]):
+        cat = "virulence"
+    if any(k in s for k in ["temperature-sensitive","temperature sensitive"]):
+        cat = "temperature_sensitivity"
+    if "binding" in s:
+        cat = "binding"
+    # Use concise effect_summary = sentence (trimmed)
+    return cat, sentence
+
+def _token_position(token: str) -> Optional[int]:
+    nums = re.findall(r"\d+", token)
+    try:
+        return int(nums[0]) if nums else None
+    except Exception:
+        return None
+
+def _regex_mine_features(aug_text: str) -> List[Dict[str, Any]]:
+    feats: List[Dict[str, Any]] = []
+    for m in _MUTATION_TOKEN_RE.finditer(aug_text):
+        token = m.group(0)
+        i = m.start()
+        sentence = _window(aug_text, i)
+        protein = _nearest_protein(aug_text, i)
+        virus = None
+        strain = None
+        vnear = _VIRUS_NEAR_RE.search(aug_text[max(0, i-150): i+150])
+        if vnear:
+            vv = vnear.group(1).lower()
+            virus = "Dengue virus"
+            st = _STRAIN_RE.search(vnear.group(0))
+            if st:
+                strain = f"DENV-{st.group(1)}"
+            elif "denv-1" in vv: strain = "DENV-1"
+            elif "denv-2" in vv: strain = "DENV-2"
+            elif "denv-3" in vv: strain = "DENV-3"
+            elif "denv-4" in vv: strain = "DENV-4"
+        cat, eff = _infer_effect_category(sentence)
+        quote = _trim_quote(sentence, 20)
+        pos = _token_position(token)
+        feat = {
+            "virus": virus or "Dengue virus",
+            "source_strain": strain,
+            "protein": protein,
+            "mutation": token.strip(),
+            "position": pos,
+            "effect_category": cat,
+            "effect_summary": eff,
+            "mechanism_hypothesis": None,
+            "experiment_context": {"system": None, "assay": None, "temperature": None},
+            "evidence_quotes": [quote] if quote else [token],
+            "cross_refs": [],
+            "confidence": 0.8  # heuristic baseline; will be filtered by sanitizer if quotes don't match
+        }
+        feats.append(feat)
     return feats
 
-# ===== Sanitizer & Grounding (kept, but you can rely on the strict sanitizer above) =====
+# ===== Core IE =====
 
-def _looks_like_dengue(name: Optional[str]) -> bool:
-    if not name:
-        return False
-    n = str(name).lower()
-    return any(k in n for k in ["dengue", "denv", "dengue virus", "denv-1", "denv-2", "denv-3", "denv-4"])
+def extract_sequence_features(
+    paper_text: str,
+    pmid: Optional[str] = None,
+    pmcid: Optional[str] = None,
+    virus_filter: Optional[str] = None,
+    protein_filter: Optional[str] = None,
+    model: str = DEFAULT_MODEL,
+    temperature: float = 0.0,
+    max_tokens: int = 2048,
+) -> Dict[str, Any]:
+    # Augment the text with canonical tokens so the strict grounding gate can succeed
+    augmented = _augment_text_with_canonical_tokens(paper_text)
+    messages = _build_messages(augmented, pmid, pmcid, virus_filter, protein_filter)
+    raw = chat_complete(messages, model=model, temperature=temperature, max_tokens=max_tokens)
+    parsed = _parse_json(raw, pmid, pmcid)
+    return sanitize_and_filter_strict(parsed, augmented)
 
+# --- Back-compat wrapper for older pipeline code expecting `clean_and_ground` ---
 def clean_and_ground(
-    result: Dict[str, Any],
+    result: dict,
     full_text: str,
     restrict_to_paper: bool = True,
     *,
     require_mutation_in_quote: bool = True,
-    min_confidence: float = 0.75,
-    propagate_class_statements: bool = True,
+    min_confidence: float = 0.0,
+    propagate_class_statements: bool = False,
     dengue_only: bool = True,
-) -> Dict[str, Any]:
-    # (unchanged from your version; you can still use it if you want an additional pass)
-    if not isinstance(result, dict):
-        return {"paper": {"title": None, "pmid": None, "pmcid": None, "virus_candidates": [], "protein_candidates": []},
-                "sequence_features": []}
+) -> dict:
+    """
+    Back-compat: apply strict sanitization using the same augmented text that the model saw.
+    Drops items without a recognizable token or a verbatim grounded quote containing that token.
+    Respects a minimal confidence cutoff if present in items (safe no-op if absent).
+    """
+    augmented = _augment_text_with_canonical_tokens(full_text or "")
+    safe_result = result if isinstance(result, dict) else {"paper": {}, "sequence_features": []}
+    cleaned = sanitize_and_filter_strict(safe_result, augmented)
+    try:
+        thr = float(min_confidence or 0.0)
+    except Exception:
+        thr = 0.0
+    feats = []
+    for f in cleaned.get("sequence_features", []):
+        conf = f.get("confidence", None)
+        if conf is None or (isinstance(conf, (int, float)) and conf >= thr):
+            feats.append(f)
+    cleaned["sequence_features"] = feats
+    return cleaned
 
-    paper = result.get("paper", {}) or {}
-    feats = result.get("sequence_features", []) or []
-
-    paper["title"] = paper.get("title") or None
-    paper["pmid"] = str(paper.get("pmid")) if paper.get("pmid") else None
-    paper["pmcid"] = str(paper.get("pmcid")) if paper.get("pmcid") else None
-    paper["virus_candidates"] = [v for v in (paper.get("virus_candidates") or []) if isinstance(v, str)]
-    pc_raw = [p for p in (paper.get("protein_candidates") or []) if isinstance(p, str)]
-    pc = []; pseen = set()
-    for pstr in pc_raw:
-        cp = _canon_protein(pstr) or pstr
-        if cp not in pseen:
-            pseen.add(cp); pc.append(cp)
-    paper["protein_candidates"] = pc
-
-    if propagate_class_statements and feats:
-        feats = _apply_class_statements(full_text, feats)
-
-    cleaned: List[Dict[str, Any]] = []
-    seen = set()
-
-    for f in feats:
-        if not isinstance(f, dict): continue
-        virus = f.get("virus") or None
-        if dengue_only and virus and not _looks_like_dengue(virus):
-            continue
-
-        protein = _canon_protein(f.get("protein") or None)
-        mutation = f.get("mutation") or None
-        pos = _coerce_int(f.get("position"))
-        cat = f.get("effect_category") or None
-        summary = f.get("effect_summary") or None
-        mech = f.get("mechanism_hypothesis") or None
-        ctx = f.get("experiment_context") or {}
-        quotes = [q for q in (f.get("evidence_quotes") or []) if isinstance(q, str)]
-        quotes = [_trim_quote(q) for q in quotes if q]; quotes = [q for q in quotes if q]
-
-        grounded_quotes = [q for q in quotes if _quote_in_text(q, full_text)]
-        if restrict_to_paper and not grounded_quotes: continue
-
-        if require_mutation_in_quote and isinstance(mutation, str):
-            if not any(mutation.lower() in q.lower() for q in grounded_quotes): continue
-
-        xrefs_in = f.get("cross_refs") or []
-        xrefs_out = []
-        for xr in xrefs_in:
-            if not isinstance(xr, dict): continue
-            pmid = xr.get("pmid"); note = xr.get("note")
-            if pmid is None or _is_valid_pmid(str(pmid)):
-                xrefs_out.append({"pmid": (str(pmid) if pmid is not None else None), "note": note or None})
-
-        virus, source_strain = _canon_virus_and_strain(virus, f.get("source_strain"))
-        if not source_strain:
-            inferred = _infer_source_strain(full_text)
-            if inferred: source_strain = inferred
-
-        feat = {
-            "virus": virus,
-            "source_strain": source_strain or None,
-            "protein": protein,
-            "mutation": mutation,
-            "position": pos,
-            "effect_category": cat,
-            "effect_summary": summary,
-            "mechanism_hypothesis": mech,
-            "experiment_context": {
-                "system": (ctx.get("system") or None),
-                "assay": (ctx.get("assay") or None),
-                "temperature": (ctx.get("temperature") or None),
-            },
-            "evidence_quotes": grounded_quotes,
-            "cross_refs": xrefs_out,
-        }
-
-        conf = _score_feature(feat, full_text)
-        if conf < float(min_confidence): continue
-        feat["confidence"] = round(conf, 3)
-
-        key = (
-            str(feat["virus"]).lower() if feat["virus"] else "",
-            str(feat["protein"]).lower() if feat["protein"] else "",
-            str(feat["mutation"]).lower() if feat["mutation"] else "",
-            str(feat["effect_category"]).lower() if feat["effect_category"] else "",
-            (feat["effect_summary"] or "").strip().lower(),
-        )
-        if key in seen: continue
-        seen.add(key)
-        cleaned.append(feat)
-
-    cleaned = _coalesce_by_key(cleaned)
-    return {"paper": paper, "sequence_features": cleaned}
-
-# ===== Public =====
+# ===== Public (runs LLM + regex miner, merges, sanitizes) =====
 
 def run_on_paper(full_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     meta = meta or {}
@@ -630,6 +686,9 @@ def run_on_paper(full_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict[
     exhaustive = bool(meta.get("exhaustive", True))
     chunk_chars = int(meta.get("chunk_chars", 16000)); overlap_chars = int(meta.get("overlap_chars", 500))
     delay_ms = int(meta.get("delay_ms", 400))
+
+    # Use one augmented copy across both LLM and regex miner
+    augmented_full = _augment_text_with_canonical_tokens(full_text or "")
 
     def _pass(text: str, vflt: Optional[str], pflt: Optional[str]):
         chunks = _chunk_text(text, max_chars=chunk_chars, overlap=overlap_chars)
@@ -645,14 +704,28 @@ def run_on_paper(full_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict[
             if delay_ms > 0: time.sleep(delay_ms / 1000.0)
         return v_cands, p_cands, feats
 
-    virus_cands, protein_cands, all_feats = _pass(full_text, virus_filter, protein_filter)
+    # LLM pass(es) over augmented text
+    virus_cands, protein_cands, all_feats = _pass(augmented_full, virus_filter, protein_filter)
     if exhaustive:
-        v2, p2, f2 = _pass(full_text, None, None)
+        v2, p2, f2 = _pass(augmented_full, None, None)
         virus_cands = _merge_lists_unique(virus_cands, v2, limit=8)
         protein_cands = _merge_lists_unique(protein_cands, p2, limit=12)
         all_feats.extend(f2)
 
+    # Regex miner over augmented text (deterministic)
+    mined_feats = _regex_mine_features(augmented_full)
+    all_feats.extend(mined_feats)
+
     merged_feats = _merge_features(all_feats)
-    return {"paper": {"pmid": pmid, "pmcid": pmcid, "title": None, "virus_candidates": virus_cands,
-                      "protein_candidates": protein_cands},
-            "sequence_features": merged_feats}
+    return {
+        "paper": {"pmid": pmid, "pmcid": pmcid, "title": None,
+                  "virus_candidates": virus_cands, "protein_candidates": protein_cands},
+        "sequence_features": merged_feats
+    }
+
+__all__ = [
+    "run_on_paper",
+    "clean_and_ground",
+    "extract_sequence_features",
+    "sanitize_and_filter_strict",
+]

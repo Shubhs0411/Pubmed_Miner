@@ -1,26 +1,25 @@
-# app.py
-import os, json, time
+# app.py (simplified UI, fixed selection persistence + full-text view/download)
+import os, json, time, io, zipfile
+from datetime import date
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
-from datetime import date
 
 from services.pubmed import (
     esearch_reviews, esummary, parse_pubdate_interval, overlaps, to_pdat
 )
 from pipeline.batch_analyze import fetch_all_fulltexts, analyze_texts, flatten_to_rows
 
-# ---------------- Helpers to persist & bucketize ----------------
+# ---------------- Helpers ----------------
 def _persist(key, value):
     st.session_state[key] = value
     return value
 
 def _bucketize_papers(papers_dict):
-    """Split papers into fetched/no_pmc/error lists for display/download."""
     fetched, no_pmc, errors = [], [], []
     for pmid, info in papers_dict.items():
         row = {
-            "PMID": pmid,
+            "PMID": str(pmid),
             "PMCID": info.get("pmcid") or "",
             "Title": info.get("title") or "",
             "Status": info.get("status"),
@@ -37,253 +36,324 @@ def _bucketize_papers(papers_dict):
 # ---------------- App setup ----------------
 load_dotenv()
 st.set_page_config(page_title="PubMed → PMC → LLM (Batch Miner)", layout="wide")
-st.title("🧪 PubMed Review Miner: Query → Full Text → LLM (Batch)")
-st.caption("Search review articles by query & date range, fetch PMC full text, run your LLM extractor across all, and download a CSV of protein/mutation findings.")
+st.title("🧪 PubMed Review Miner")
+st.caption("Search review articles, fetch PMC full text, run your LLM extractor, and download findings.")
 
-# ---------------- Sidebar (advanced controls) ----------------
+# ---------------- Sidebar: minimal knobs, advanced collapsed ----------------
 with st.sidebar:
-    st.header("LLM & Extraction Settings")
-    st.caption("These control chunking, filters, and thresholds used for every paper.")
+    st.header("Extraction Settings")
     virus_filter = st.text_input("Virus filter (optional)", value="Dengue virus")
     protein_filter = st.text_input("Protein filter (optional)", value="protein")
     exhaustive = st.checkbox("Exhaustive mode", value=True)
-    with st.expander("Advanced", expanded=False):
+
+    with st.expander("Advanced (chunking & thresholds)", expanded=False):
         chunk_chars = st.slider("Max chars per chunk", 8000, 24000, 16000, 1000)
         overlap_chars = st.slider("Overlap per chunk", 200, 1500, 500, 50)
         delay_ms = st.slider("Delay between chunk calls (ms)", 0, 1500, 400, 50)
         min_conf = st.slider("Min confidence", 0.0, 1.0, 0.6, 0.05)
-        require_mut_quote = st.checkbox("Require mutation token in a quote", value=True)
-    st.divider()
-    st.caption("Tip: Add NCBI_API_KEY and GROQ_API_KEY to .env for reliability.")
+        require_mut_quote = st.checkbox("Require mutation token in quote", value=True)
 
-# ---------------- Step 1–2: Query & Date Range ----------------
-st.subheader("1) Build your PubMed query (reviews only)")
-st.write("Paste a PubMed query (or build it in the PubMed UI and paste here). We’ll automatically restrict to **Review** articles.")
+    st.divider()
+    st.caption("Tip: set NCBI_API_KEY and GROQ_API_KEY in .env for reliability.")
+
+# ---------------- Step 1: Query ----------------
+st.subheader("1) Enter your PubMed query (reviews only)")
+st.write("Paste a PubMed query (we’ll restrict to **Review** articles automatically).")
 query = st.text_area("Query", height=100, placeholder='e.g., dengue[MeSH Terms] AND mutation[Text Word]')
 
-st.subheader("2) Publication date range")
-# Default to 2005–2025 inclusive
-rng = st.date_input("Inclusive range", value=(date(2005,1,1), date(2025,12,31)))
-if isinstance(rng, tuple):
-    start_date, end_date = rng
-else:
-    start_date, end_date = (rng, rng)
-
-colA, colB, colC = st.columns([1,1,1])
+# ---------------- Step 2: Date range (min 2005) + search ----------------
+st.subheader("2) Choose publication date range & search")
+colA, colB, colC = st.columns([1, 1, 1])
 with colA:
-    sort = st.selectbox("Sort", ["relevance", "pub+date"], index=0)
+    # Enforce minimum selectable date of Jan 1, 2005
+    default_range = (date(2005, 1, 1), date(2025, 12, 31))
+    rng = st.date_input(
+        "Inclusive range",
+        value=default_range,
+        min_value=date(2005, 1, 1),
+        help="Earliest allowed start date is Jan 1, 2005."
+    )
 with colB:
-    cap = st.slider("Max records to fetch", 50, 5000, 1000, 50)
+    sort = st.selectbox("Sort", ["relevance", "pub+date"], index=0)
 with colC:
-    go = st.button("🔎 Search PubMed (reviews)")
+    cap = st.slider("Max records", 50, 5000, 1000, 50)
+
+go = st.button("🔎 Search PubMed (reviews)")
 
 if go:
     if not query.strip():
         st.warning("Please enter a query.")
     else:
+        start_date, end_date = (rng if isinstance(rng, tuple) else (rng, rng))
         mindate = to_pdat(start_date)
         maxdate = to_pdat(end_date)
+
         with st.spinner("Searching PubMed (reviews)…"):
             pmids = esearch_reviews(query.strip(), mindate=mindate, maxdate=maxdate, sort=sort, cap=cap)
             sums = esummary(pmids)
-        st.success(f"Found {len(pmids)} candidate review PMIDs (before local date parsing).")
 
-        # local robust interval filter to match CSV-style PubDate shapes
+        # Robust local date interval filter
         rows = []
         for pid in pmids:
             meta = sums.get(pid, {})
             pubdate_raw = meta.get("pubdate") or ""
             if overlaps(parse_pubdate_interval(pubdate_raw), (start_date, end_date)):
                 rows.append({
-                    "PMID": pid,
+                    "PMID": str(pid),
                     "Title": meta.get("title") or "",
                     "Journal": meta.get("source") or "",
                     "PubDate": pubdate_raw,
                     "PubMed Link": f"https://pubmed.ncbi.nlm.nih.gov/{pid}/",
                 })
 
-        st.markdown("#### Search results (after robust date filter)")
+        # Persist results for stable rendering outside this block
         df_hits = pd.DataFrame(rows)
         if df_hits.empty:
+            # Clear old state if no results for this new search
+            for k in ["hits_df", "hits_pmids", "selected_pmids"]:
+                if k in st.session_state:
+                    del st.session_state[k]
             st.info("No results in this date range.")
         else:
-            st.dataframe(df_hits, use_container_width=True)
-            st.download_button(
-                "⬇️ Download matches (.csv)",
-                data=df_hits.to_csv(index=False).encode("utf-8"),
-                file_name="pubmed_review_matches.csv",
-                mime="text/csv"
-            )
+            df_hits["PMID"] = df_hits["PMID"].astype(str)
+            _persist("hits_df", df_hits.to_dict("records"))
             _persist("hits_pmids", df_hits["PMID"].tolist())
+            # On a new search, start with no selection
+            st.session_state["selected_pmids"] = []
+            st.success(f"Found {len(df_hits)} results. See 'Results' below to select papers.")
 
-            # ---- Selection UI: Select All or pick specific PMIDs ----
-            st.markdown("##### Select PMIDs to process")
-            if "selected_pmids" not in st.session_state:
-                st.session_state["selected_pmids"] = []
-            col1, col2 = st.columns([1,3])
-            with col1:
-                select_all = st.checkbox("Select all", value=(len(st.session_state["selected_pmids"]) == len(df_hits)))
-            if select_all:
-                st.session_state["selected_pmids"] = df_hits["PMID"].tolist()
-            with col2:
-                st.session_state["selected_pmids"] = st.multiselect(
-                    "Choose PMIDs",
-                    options=df_hits["PMID"].tolist(),
-                    default=st.session_state["selected_pmids"],
-                )
-            st.caption(f"Selected: {len(st.session_state['selected_pmids'])} of {len(df_hits)}")
-            if st.session_state["selected_pmids"]:
-                st.download_button(
-                    "⬇️ Download selected PMIDs (.txt)",
-                    data=("\n".join(st.session_state["selected_pmids"]).encode("utf-8")),
-                    file_name="selected_pmids.txt",
-                    mime="text/plain",
-                )
+# --- Persistent Results & Selection (always visible after a search) ---
+if st.session_state.get("hits_df"):
+    st.markdown("#### Results")
+    df_hits = pd.DataFrame(st.session_state["hits_df"])
+    pmid_options = [str(x) for x in st.session_state.get("hits_pmids", [])]
 
-# ---------------- Step 3: Fetch → LLM with live progress & persistent state ----------------
-st.divider()
-st.subheader("3) Fetch PMC full texts & run LLM across all")
+    st.dataframe(df_hits, use_container_width=True)
+    st.download_button(
+        "⬇️ Download matches (.csv)",
+        data=df_hits.to_csv(index=False).encode("utf-8"),
+        file_name="pubmed_review_matches.csv",
+        mime="text/csv"
+    )
 
-colX, colY, colZ = st.columns([1,1,2])
-with colX:
-    run_fetch = st.button("📥 Fetch PMC texts")
-with colY:
-    run_llm = st.button("🧠 Run LLM on fetched")
-with colZ:
-    if st.button("🔁 Reset batch"):
-        for k in ["hits_pmids", "batch_papers", "batch_results", "llm_log"]:
-            if k in st.session_state:
-                del st.session_state[k]
-        st.experimental_rerun()
+    st.markdown("##### Select PMIDs to process with LLM")
+    # Initialize selection if missing
+    if "selected_pmids" not in st.session_state:
+        st.session_state["selected_pmids"] = []
 
-# ---------- A) FETCH: Persist and show buckets ----------
-if run_fetch:
-    # Prefer user-selected PMIDs if available; else all hits
-    pmids = st.session_state.get("selected_pmids") or st.session_state.get("hits_pmids", [])
+    # Separate keys so toggling 'Select all' doesn't reset multiselect by accident
+    select_all = st.checkbox("Select all", value=False, key="select_all_hits")
+    if select_all:
+        st.session_state["selected_pmids"] = pmid_options.copy()
+
+    st.session_state["selected_pmids"] = st.multiselect(
+        "Choose PMIDs (multi-select supported)",
+        options=pmid_options,
+        default=[p for p in st.session_state["selected_pmids"] if p in pmid_options],
+        key="pmid_multiselect"
+    )
+    st.caption(f"Selected: {len(st.session_state['selected_pmids'])} of {len(pmid_options)}")
+
+    if st.session_state["selected_pmids"]:
+        st.download_button(
+            "⬇️ Download selected PMIDs (.txt)",
+            data=("\n".join(st.session_state["selected_pmids"]).encode("utf-8")),
+            file_name="selected_pmids.txt",
+            mime="text/plain",
+        )
+
+# ---------------- Step 3: One-click end-to-end (Fetch PMC → LLM) ----------------
+st.subheader("3) Run extraction")
+
+colA, colB, colC = st.columns([1, 1, 1])
+with colA:
+    # Explicit ALL override (default OFF)
+    override_all = st.checkbox(
+        "Process ALL results (ignore selection)",
+        value=False,
+        help="When checked, all results from Step 2 will be sent to the LLM."
+    )
+with colB:
+    # Clear previous findings/logs to avoid confusion across runs (default ON)
+    clear_previous = st.checkbox(
+        "Clear previous results before run",
+        value=True,
+        help="Prevents older findings from appearing alongside this run."
+    )
+with colC:
+    run_all = st.button(
+        "🚀 Fetch PMC & Run LLM",
+        disabled=(not override_all and len(st.session_state.get("selected_pmids", [])) == 0)
+    )
+
+# Reset button
+if st.button("🔁 Reset"):
+    for k in ["hits_df", "hits_pmids", "batch_papers", "batch_results", "llm_log", "selected_pmids", "select_all_hits", "pmid_multiselect"]:
+        if k in st.session_state:
+            del st.session_state[k]
+    st.experimental_rerun()
+
+if run_all:
+    # Decide EXACT set of PMIDs for THIS run (no silent fallback)
+    hits = [str(x) for x in st.session_state.get("hits_pmids", [])]
+    selected = [str(x) for x in st.session_state.get("selected_pmids", [])]
+    pmids = hits if override_all else selected
+
     if not pmids:
-        st.warning("Please run a search first (Step 1 & 2).")
-    else:
-        if not os.getenv("GROQ_API_KEY"):
-            st.info("Note: GROQ_API_KEY isn’t set—LLM will still run if your code handles it, but set it in .env for reliability.")
+        st.warning("No PMIDs selected. Pick at least one in Step 2 or check 'Process ALL results'.")
+        st.stop()
 
-        with st.spinner(f"Fetching PMC full texts for {len(pmids)} selected PMIDs…"):
-            papers = fetch_all_fulltexts(pmids, delay_ms=150)
-            _persist("batch_papers", papers)
+    # Optional: clear prior findings/logs so outputs only reflect this run
+    if clear_previous:
+        st.session_state["batch_results"] = {}
+        st.session_state["llm_log"] = []
 
-        fetched, no_pmc, errors = _bucketize_papers(st.session_state["batch_papers"])
-        n_ok, n_no, n_err = len(fetched), len(no_pmc), len(errors)
-        st.success(f"PMC texts fetched: ✅ {n_ok} | No PMC: ⚠️ {n_no} | Errors: ❌ {n_err}")
+    if not os.getenv("GROQ_API_KEY"):
+        st.info("Note: GROQ_API_KEY isn’t set—set it in .env for best reliability.")
 
-        if n_ok:
-            st.markdown("##### ✅ Fetched (has PMC full text)")
-            df_fetched = pd.DataFrame(fetched)
-            st.dataframe(df_fetched, use_container_width=True, height=min(400, 40 + 28 * len(df_fetched)))
-            st.download_button(
-                "⬇️ Download fetched (.csv)",
-                data=df_fetched.to_csv(index=False).encode("utf-8"),
-                file_name="fetched_papers.csv",
-                mime="text/csv"
+    # A) Fetch PMC only for THIS run's PMIDs
+    with st.spinner(f"Fetching PMC full texts for {len(pmids)} PMIDs…"):
+        papers = fetch_all_fulltexts(pmids, delay_ms=150)
+        _persist("batch_papers", papers)  # persist only this run's set
+
+    fetched, no_pmc, errors = _bucketize_papers(papers)
+    n_ok, n_no, n_err = len(fetched), len(no_pmc), len(errors)
+    st.success(f"PMC texts: ✅ {n_ok} fetched | ⚠️ {n_no} no PMC | ❌ {n_err} errors")
+
+    if n_ok:
+        with st.expander("Show fetched list", expanded=False):
+            st.dataframe(pd.DataFrame(fetched), use_container_width=True, height=min(400, 40 + 28 * len(fetched)))
+    if n_no:
+        with st.expander("Show no-PMC list", expanded=False):
+            st.dataframe(pd.DataFrame(no_pmc), use_container_width=True, height=min(400, 40 + 28 * len(no_pmc)))
+    if n_err:
+        with st.expander("Show fetch errors", expanded=False):
+            st.dataframe(pd.DataFrame(errors), use_container_width=True, height=min(400, 40 + 28 * len(errors)))
+
+    if n_ok == 0:
+        st.stop()
+
+    # === NEW: Full-text viewer & downloads for this run (BEFORE LLM) ===
+    ok_pmids_this_run = [row["PMID"] for row in fetched]  # fetched==ok only
+    st.markdown("#### Full texts for this run (selected & fetched)")
+
+    # Build in-memory zip of all full texts
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for pmid in ok_pmids_this_run:
+            info = papers.get(pmid, {})
+            title = info.get("title") or ""
+            pmcid = info.get("pmcid") or ""
+            text = (
+                info.get("text")
+                or info.get("fulltext")
+                or info.get("content")
+                or ""
             )
-
-        if n_no:
-            st.markdown("##### ⚠️ No PMC (skipped)")
-            df_no = pd.DataFrame(no_pmc)
-            st.dataframe(df_no, use_container_width=True, height=min(400, 40 + 28 * len(df_no)))
-            st.download_button(
-                "⬇️ Download no_pmc (.csv)",
-                data=df_no.to_csv(index=False).encode("utf-8"),
-                file_name="no_pmc_papers.csv",
-                mime="text/csv"
-            )
-
-        if n_err:
-            st.markdown("##### ❌ Errors (fetch failed)")
-            df_err = pd.DataFrame(errors)
-            st.dataframe(df_err, use_container_width=True, height=min(400, 40 + 28 * len(df_err)))
-            st.download_button(
-                "⬇️ Download fetch_errors (.csv)",
-                data=df_err.to_csv(index=False).encode("utf-8"),
-                file_name="fetch_errors.csv",
-                mime="text/csv"
-            )
-
-# ---------- B) LLM: Real-time progress + persistent results ----------
-if run_llm:
-    papers = st.session_state.get("batch_papers", {})
-    if not papers:
-        st.warning("Please fetch PMC texts first.")
-    else:
-        # Which PMIDs to process
-        pmids_order = [pid for pid, info in papers.items() if info.get("status") == "ok"]
-        if not pmids_order:
-            st.info("Nothing to analyze (no fetched papers).")
-        else:
-            # Initialize / reuse logs and results
-            llm_log = st.session_state.get("llm_log", [])
-            batch_results = st.session_state.get("batch_results", {})
-
-            # UI containers for live updates
-            prog = st.progress(0, text="Starting LLM passes…")
-            log_box = st.empty()
-            table_box = st.empty()
-
-            total = len(pmids_order)
-            for i, pmid in enumerate(pmids_order, start=1):
-                title = papers[pmid].get("title") or ""
-                pmcid = papers[pmid].get("pmcid") or ""
-                log_line = f"[{i}/{total}] Analyzing PMID {pmid} ({pmcid}) — {title[:80]}"
-                llm_log.append(log_line)
-                _persist("llm_log", llm_log)
-                log_box.code("\n".join(llm_log[-20:]), language="text")  # show last ~20 lines
-
-                try:
-                    # Run LLM for just this one (reusing your exact pipeline)
-                    single_dict = analyze_texts(
-                        {pmid: papers[pmid]},
-                        virus_filter=virus_filter, protein_filter=protein_filter,
-                        exhaustive=exhaustive, chunk_chars=chunk_chars, overlap_chars=overlap_chars,
-                        delay_ms=delay_ms, min_confidence=min_conf, require_mut_quote=require_mut_quote,
+            # Individual expander with per-paper download
+            with st.expander(f"{pmid} — {title[:100]}"):
+                if pmcid:
+                    st.markdown(f"**PMCID:** {pmcid}  |  [Open PMC](https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/)")
+                else:
+                    st.markdown("**PMCID:** (not available)")
+                if text:
+                    st.text_area("Full text (preview)", value=text, height=300, key=f"ta_{pmid}")
+                    st.download_button(
+                        f"⬇️ Download full text ({pmid}).txt",
+                        data=text.encode("utf-8"),
+                        file_name=f"{pmid}_{(pmcid or 'NO_PMCID')}.txt",
+                        mime="text/plain",
+                        key=f"dl_txt_{pmid}"
                     )
-                    # Merge into batch_results (persist after each paper)
-                    batch_results.update(single_dict)
-                    _persist("batch_results", batch_results)
+                    # Optional: if HTML is present, offer it too
+                    html = info.get("html") or info.get("raw_html")
+                    if html:
+                        st.download_button(
+                            f"⬇️ Download HTML ({pmid}).html",
+                            data=html.encode("utf-8"),
+                            file_name=f"{pmid}_{(pmcid or 'NO_PMCID')}.html",
+                            mime="text/html",
+                            key=f"dl_html_{pmid}"
+                        )
+                else:
+                    st.info("No full text captured for this paper.")
 
-                    # Live partial table of findings so far
-                    out_df_partial = flatten_to_rows(batch_results)
-                    table_box.dataframe(out_df_partial, use_container_width=True)
-                except Exception as e:
-                    err_line = f"   ↳ ERROR on PMID {pmid}: {e}"
-                    llm_log.append(err_line)
-                    _persist("llm_log", llm_log)
-                    log_box.code("\n".join(llm_log[-20:]), language="text")
+            # Add to zip (even if empty string; optional—skip empties if you prefer)
+            safe_name = f"{pmid}_{(pmcid or 'NO_PMCID')}".replace("/", "_")
+            zf.writestr(f"{safe_name}.txt", text if text else "")
 
-                prog.progress(int(i * 100 / total), text=f"LLM progress: {i}/{total}")
+    st.download_button(
+        "⬇️ Download all selected full texts (.zip)",
+        data=zip_buf.getvalue(),
+        file_name="selected_full_texts.zip",
+        mime="application/zip"
+    )
 
-            st.success("LLM extraction complete for fetched papers.")
+    # ---------- B) Run LLM ONLY on PMIDs chosen for THIS run and with ok status ----------
+    # Always re-derive from session state (survives Streamlit reruns)
+    papers = st.session_state.get("batch_papers", {})
+    ok_pmids_this_run = [pid for pid, info in papers.items() if info.get("status") == "ok"]
 
-            # Final tables + downloads
-            out_df = flatten_to_rows(st.session_state.get("batch_results", {}))
-            st.markdown("#### Findings table (one row per mutation finding)")
-            st.dataframe(out_df, use_container_width=True)
+    if not ok_pmids_this_run:
+        st.info("Nothing to analyze: no successfully fetched PMC full texts in this run.")
+        st.stop()
 
-            st.download_button(
-                "⬇️ Download findings (.csv)",
-                data=out_df.to_csv(index=False).encode("utf-8"),
-                file_name="pubmed_mutation_findings.csv",
-                mime="text/csv"
+    llm_log = st.session_state.get("llm_log", [])
+    batch_results = st.session_state.get("batch_results", {})
+
+    prog = st.progress(0, text="Starting LLM…")
+    log_box = st.empty()
+
+    # Single findings header + one reusable table container (no duplicate tables)
+    st.markdown("#### Findings")
+    table_box = st.empty()
+
+    total = len(ok_pmids_this_run)
+    for i, pmid in enumerate(ok_pmids_this_run, start=1):
+        title = papers[pmid].get("title") or ""
+        pmcid = papers[pmid].get("pmcid") or ""
+        log_line = f"[{i}/{total}] Analyzing PMID {pmid} ({pmcid}) — {title[:80]}"
+        llm_log.append(log_line); _persist("llm_log", llm_log)
+        log_box.code("\n".join(llm_log[-20:]), language="text")
+
+        try:
+            single_dict = analyze_texts(
+                {pmid: papers[pmid]},
+                virus_filter=virus_filter, protein_filter=protein_filter,
+                exhaustive=exhaustive, chunk_chars=chunk_chars, overlap_chars=overlap_chars,
+                delay_ms=delay_ms, min_confidence=min_conf, require_mut_quote=require_mut_quote,
             )
-            st.download_button(
-                "⬇️ Download raw JSON (.json)",
-                data=json.dumps(st.session_state["batch_results"], ensure_ascii=True, indent=2).encode("utf-8"),
-                file_name="pubmed_batch_results.json",
-                mime="application/json"
-            )
+            batch_results.update(single_dict); _persist("batch_results", batch_results)
 
-            # Summary line (constant & visible)
-            fetched, no_pmc, errors = _bucketize_papers(st.session_state["batch_papers"])
-            st.info(
-                f"Summary — PMC fetched: ✅ {len(fetched)} | "
-                f"No PMC: ⚠️ {len(no_pmc)} | Fetch errors: ❌ {len(errors)} | "
-                f"LLM processed: 🧠 {len([p for p in fetched if p['PMID'] in st.session_state['batch_results']])}"
-            )
+            # live (partial) view uses the SAME table container
+            out_df_partial = flatten_to_rows(batch_results)
+            table_box.dataframe(out_df_partial, use_container_width=True)
+        except Exception as e:
+            err_line = f"   ↳ ERROR on PMID {pmid}: {e}"
+            llm_log.append(err_line); _persist("llm_log", llm_log)
+            log_box.code("\n".join(llm_log[-20:]), language="text")
 
+        prog.progress(int(i * 100 / total), text=f"LLM progress: {i}/{total}")
+
+    st.success("LLM extraction complete ✅")
+
+    # Final view: update the same table_box (no second table call)
+    out_df = flatten_to_rows(st.session_state.get("batch_results", {}))
+    table_box.dataframe(out_df, use_container_width=True)
+
+    # Downloads
+    colD, colE = st.columns([1, 1])
+    with colD:
+        st.download_button(
+            "⬇️ Download findings (.csv)",
+            data=out_df.to_csv(index=False).encode("utf-8"),
+            file_name="pubmed_mutation_findings.csv",
+            mime="text/csv"
+        )
+    with colE:
+        st.download_button(
+            "⬇️ Download raw JSON (.json)",
+            data=json.dumps(st.session_state["batch_results"], ensure_ascii=True, indent=2).encode("utf-8"),
+            file_name="pubmed_batch_results.json",
+            mime="application/json"
+        )
