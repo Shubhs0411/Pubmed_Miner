@@ -193,30 +193,37 @@ def _augment_text_with_canonical_tokens(text: str) -> str:
 
     return t
 
-# ===== Generalized Prompt (updated) =====
-
-SCHEMA_EXPLANATION = """
+# ===== Generalized Prompt (dynamic system message) =====
+def make_schema_explanation(target_virus: str) -> str:
+    return f"""
 You are an information extraction model for biological literature. Extract mutation/segment-level functional findings
-from dengue virus ONLY (any serotype/strain). The PAPER_TEXT may contain helper canonical tokens we added in parentheses,
-e.g. "(H39R)", "(A54E)", "(T280Y)", "(del42-59)", "(aa1396-1435)". Use those EXACT tokens in one of your evidence quotes.
+from {{target_virus}} ONLY (including its serotypes/lineages/strains if applicable). The PAPER_TEXT may contain helper
+canonical tokens we added in parentheses, e.g. "(H39R)", "(A54E)", "(T280Y)", "(del42-59)", "(aa1396-1435)".
+Use those EXACT tokens in one of your evidence quotes.
+
+VIRUS SCOPING
+- Only include findings for {{target_virus}} (and its stated serotypes/lineages/strains).
+- Ignore other organisms unless they’re used as comparators for the SAME mutation effect in {{target_virus}}.
+- Virus names should be the organism name (e.g., "Influenza A virus", "SARS-CoV-2") rather than host species.
 
 SPLITTING & NORMALIZATION
 - If a sentence describes multiple mutations together (e.g., "S114, W115, D180 or T301 alanine substitutions"),
   output a separate item for each, e.g., S114A, W115A, D180A, T301A.
 - Region/segment edits are valid mutations, e.g., "del42-59" (deletion) or "aa1396-1435" (segment).
 - Prefer precise direction/magnitude ("abolished", "reduced ~10-fold", "no effect"), and include system/assay if stated.
+- Normalize mutation strings when possible (e.g., N501Y, D125A, del69-70, p.Asp125Ala, K70*, aa1396-1435).
 
 OUTPUT FORMAT (STRICT JSON ONLY)
-{
-  "paper": {
+{{
+  "paper": {{
     "pmid": "<string or null>",
     "pmcid": "<string or null>",
     "title": "<string or null>",
     "virus_candidates": ["<organism name>", ...],
     "protein_candidates": ["<protein or gene>", ...]
-  },
+  }},
   "sequence_features": [
-    {
+    {{
       "virus": "<organism name or null>",
       "source_strain": "<strain/serotype/lineage if stated, else null>",
       "protein": "<protein or gene symbol>",
@@ -225,12 +232,12 @@ OUTPUT FORMAT (STRICT JSON ONLY)
       "effect_category": "<one of: RNA_synthesis | virion_assembly | binding | replication | infectivity | virulence | immune_evasion | drug_interaction | temperature_sensitivity | activity_change | modification | other>",
       "effect_summary": "<1-2 sentences>",
       "mechanism_hypothesis": "<brief mechanistic explanation if present, else null>",
-      "experiment_context": { "system": "<cell/animal/in vitro/in silico>", "assay": "<method>", "temperature": "<value or null>" },
+      "experiment_context": {{ "system": "<cell/animal/in vitro/in silico>", "assay": "<method>", "temperature": "<value or null>" }},
       "evidence_quotes": ["<short quote 1>", "<short quote 2>"],
-      "cross_refs": [ { "pmid": "<numeric PMID mentioned in the text, else null>", "note": "<why>" } ]
-    }
+      "cross_refs": [ {{ "pmid": "<numeric PMID mentioned in the text, else null>", "note": "<why>" }} ]
+    }}
   ]
-}
+}}
 
 RULES
 - Only report findings explicitly supported by the PAPER_TEXT; avoid generic background.
@@ -238,15 +245,20 @@ RULES
 - At least one evidence quote per item MUST contain the exact mutation/segment token (e.g., "H39R", "A54E", "del42-59", "aa1396-1435").
 - If no such quote exists, do not output that item.
 - If a statement lists several mutations and a shared effect, create one item per mutation and reuse the shared quote.
-- Keep position numeric where possible; else null. Use dengue-only entities for virus names.
+- Keep position numeric where possible; else null. Use {{target_virus}}-only entities for virus names.
 - Output MUST be valid JSON (no extra commentary).
-"""
+""".replace("{{target_virus}}", target_virus)
 
 def _build_messages(paper_text: str,
                     pmid: Optional[str] = None,
                     pmcid: Optional[str] = None,
                     virus_filter: Optional[str] = None,
                     protein_filter: Optional[str] = None) -> List[Dict[str, str]]:
+    """
+    Build OpenAI-style chat messages. The system message is produced dynamically
+    from the virus_filter (or a generic fallback).
+    """
+    schema_text = make_schema_explanation(virus_filter or "the specified virus").strip()
     user_instr = {
         "pmid": pmid,
         "pmcid": pmcid,
@@ -260,7 +272,7 @@ def _build_messages(paper_text: str,
         + paper_text
     )
     return [
-        {"role": "system", "content": SCHEMA_EXPLANATION.strip()},
+        {"role": "system", "content": schema_text},
         {"role": "user", "content": user_msg},
     ]
 
