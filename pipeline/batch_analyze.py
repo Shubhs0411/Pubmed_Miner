@@ -6,7 +6,10 @@ import time
 import pandas as pd
 
 from extractor import get_pmc_fulltext_with_meta  # your existing fetcher
-from llm_groq import run_on_paper, clean_and_ground  # your existing LLM + cleaner
+#from llm_groq import run_on_paper, clean_and_ground  # your existing LLM + cleaner
+from llm_gemini import run_on_paper, clean_and_ground 
+import os
+import time
 
 
 def fetch_all_fulltexts(pmids: List[str],
@@ -58,20 +61,31 @@ def fetch_all_fulltexts(pmids: List[str],
     return out
 
 
-def analyze_texts(papers: Dict[str, Dict],
-                  *,
-                  virus_filter: Optional[str],
-                  protein_filter: Optional[str],
-                  exhaustive: bool,
-                  chunk_chars: int,
-                  overlap_chars: int,
-                  delay_ms: int,
-                  min_confidence: float,
-                  require_mut_quote: bool) -> Dict[str, Dict]:
+def analyze_texts(papers: dict,
+        *,
+        virus_filter: str = "",
+        protein_filter: str = "",
+        exhaustive: bool = True,
+        chunk_chars: int = 12000,
+        overlap_chars: int = 500,
+        delay_ms: int = 0,
+        min_confidence: float = 0.6,
+        require_mut_quote: bool = True,
+        llm_meta: dict | None = None,
+        paper_pause_sec: float | None = None,  # <-- NEW: gentle pacing between papers
+        ) -> Dict[str, Dict]:
     """
-    Run the same LLM prompt (your run_on_paper) on each 'ok' paper, then clean+ground with your clean_and_ground.
+    Run the same LLM prompt (run_on_paper) on each 'ok' paper, then clean+ground.
     Returns dict[pmid] = { status, pmcid, title, result? }
     """
+
+    # Default from env if not provided; sane free-tier friendly default
+    if paper_pause_sec is None:
+        try:
+            paper_pause_sec = float(os.getenv("PAPER_PAUSE_SEC", "2.0"))
+        except Exception:
+            paper_pause_sec = 2.0
+
     results: Dict[str, Dict] = {}
     for pmid, info in papers.items():
         if info.get("status") != "ok":
@@ -87,19 +101,21 @@ def analyze_texts(papers: Dict[str, Dict],
         pmcid = info.get("pmcid")
         title = info.get("title")
 
-        raw = run_on_paper(
-            text,
-            meta={
-                "pmid": pmid,
-                "pmcid": pmcid,
-                "virus_filter": virus_filter or None,
-                "protein_filter": protein_filter or None,
-                "exhaustive": exhaustive,
-                "chunk_chars": chunk_chars,
-                "overlap_chars": overlap_chars,
-                "delay_ms": delay_ms,
-            },
-        )
+        # ---- pass meta through to the backend (Groq or Gemini) ----
+        meta = {
+            "pmid": pmid,
+            "pmcid": pmcid,
+            "virus_filter": (virus_filter or None),
+            "protein_filter": (protein_filter or None),
+            "exhaustive": exhaustive,
+            "chunk_chars": chunk_chars,
+            "overlap_chars": overlap_chars,
+            "delay_ms": delay_ms,
+        }
+        if llm_meta:
+            meta.update(llm_meta)
+
+        raw = run_on_paper(text, meta=meta)
 
         cleaned = clean_and_ground(
             raw,
@@ -117,6 +133,11 @@ def analyze_texts(papers: Dict[str, Dict],
             "title": title,
             "result": cleaned,
         }
+
+        # ---- NEW: gentle pacing between papers to avoid 429s ----
+        if paper_pause_sec and paper_pause_sec > 0:
+            time.sleep(paper_pause_sec)
+
     return results
 
 
