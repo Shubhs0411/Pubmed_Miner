@@ -10,6 +10,7 @@ import time
 import threading
 from time import monotonic as _mono
 from typing import List, Dict, Any, Optional
+from typing import Tuple
 
 # Load .env if present
 try:
@@ -148,52 +149,68 @@ def _safe_json_loads(raw: str) -> Optional[dict]:
 # ===== Prompts (kept aligned with your llm_groq.py) =====
 def _pass1_prompt(paper_text: str) -> str:
     sys = (
-        "You extract mutation tokens from biomedical papers.\n"
-        "Return ONLY normalized mutation/segment tokens that occur in the text, no commentary.\n"
-        "Normalize to concise forms such as N501Y, D125A, K70*, del69-70, aa1396-1435, p.Asp125Ala, insA/insAla.\n"
+        "You extract sequence-related tokens from biomedical papers.\n"
+        "Return ONLY normalized tokens that occur in the text, no commentary.\n"
+        "Token types and normalization rules:\n"
+        "  • mutations: concise forms such as N501Y, D125A, K70*, del69-70, aa1396-1435, p.Asp125Ala, insA/insAla.\n"
+        "  • proteins: gene/protein symbols or names (e.g., BRCA1, NS1, E, Spike glycoprotein, RdRp).\n"
+        "  • amino_acids: amino-acid mentions as residue tokens when possible (e.g., K417, Lys417, p.Lys417,\n"
+        "    Ser315, S315) or bare names (Lysine, Ser) if no position is given.\n"
+        "Include items even if they are not associated with any gene/disease/effect in the paper.\n"
         "Output STRICT JSON only:\n"
-        "{ \"mutations\": [\"<token1>\", \"<token2>\", ...] }"
+        "{\n"
+        "  \"mutations\":   [\"<token>\", ...],\n"
+        "  \"proteins\":    [\"<token>\", ...],\n"
+        "  \"amino_acids\": [\"<token>\", ...]\n"
+        "}"
     )
     usr = (
-        "Extract all mutation/segment tokens present in the PAPER_TEXT. "
+        "Extract all mutation, protein, and amino-acid tokens present in the PAPER_TEXT.\n"
         "Keep unique items, preserve canonical form, and ignore background organisms unless the token is explicitly stated.\n\n"
         "PAPER_TEXT:\n" + paper_text
     )
-    return sys + "\n\n" + usr
+    return sys + "\\n\\n" + usr
 
-def _pass2_prompt(local_context: str, mutation: str, pmid: Optional[str], pmcid: Optional[str]) -> str:
+
+def _pass2_prompt(local_context: str, target_token: str, pmid: Optional[str], pmcid: Optional[str]) -> str:
     sys = (
-        "You attribute a given mutation token to virus, strain/lineage, protein, and effect using ONLY the provided context from this paper.\n"
-        "Be concise and specific. Provide 1–2 short quotes (≤ ~20 words each) that appear verbatim, and include "
-        "the exact mutation token in at least one quote. Use the controlled set of effect categories."
+        "You attribute a given biomedical TOKEN using ONLY the provided context from this paper.\n"
+        "The TOKEN may be a mutation, a protein/gene, or an amino-acid residue mention.\n"
+        "Be concise and specific. Provide 1–2 short quotes (≤ ~20 words each) that appear verbatim; "
+        "at least one quote must include the exact TOKEN string. Use the controlled effect categories when applicable."
     )
     usr = (
-        "Given the LOCAL_CONTEXT (excerpts from the paper) and the target MUTATION, extract one structured item.\n"
+        "Given the LOCAL_CONTEXT (excerpts from the paper) and the target TOKEN, extract one structured item.\n"
+        "If the paper does not state an association (e.g., no disease/effect/protein linkage), still return an item with nulls.\n"
         "STRICT JSON only:\n"
         "{\n"
         f"  \"paper\": {{\"pmid\": {json.dumps(pmid)}, \"pmcid\": {json.dumps(pmcid)}, \"title\": null,\n"
         "             \"virus_candidates\": [], \"protein_candidates\": []},\n"
         "  \"sequence_features\": [\n"
         "    {\n"
+        "      \"target_token\": " + json.dumps(target_token) + ",\n"
+        "      \"target_type\": \"<mutation|protein|amino_acid>\",\n"
         "      \"virus\": \"<organism or null>\",\n"
         "      \"source_strain\": \"<serotype/lineage/strain or null>\",\n"
-        "      \"protein\": \"<protein or gene symbol>\",\n"
-        f"      \"mutation\": {json.dumps(mutation)},\n"
+        "      \"protein\": \"<protein or gene symbol or null>\",\n"
+        "      \"mutation\": \"<mutation token or null>\",\n"
+        "      \"residue\": \"<amino-acid residue token or null>\",\n"
         "      \"position\": \"<integer or null>\",\n"
-        "      \"effect_category\": \"<RNA_synthesis|virion_assembly|binding|replication|infectivity|virulence|immune_evasion|drug_interaction|temperature_sensitivity|activity_change|modification|other>\",\n"
-        "      \"effect_summary\": \"<1-2 sentences specific to this paper>\",\n"
+        "      \"effect_category\": \"<RNA_synthesis|virion_assembly|binding|replication|infectivity|virulence|immune_evasion|drug_interaction|temperature_sensitivity|activity_change|modification|other|null>\",\n"
+        "      \"effect_summary\": \"<1-2 sentences specific to this paper or null>\",\n"
         "      \"mechanism_hypothesis\": \"<brief or null>\",\n"
-        "      \"experiment_context\": {\"system\": \"<cell/animal/in vitro/in silico>\", \"assay\": \"<method>\", \"temperature\": \"<value or null>\"},\n"
+        "      \"experiment_context\": {\"system\": \"<cell/animal/in vitro/in silico or null>\", \"assay\": \"<method or null>\", \"temperature\": \"<value or null>\"},\n"
         "      \"evidence_quotes\": [\"<short quote 1>\", \"<short quote 2>\"],\n"
         "      \"cross_refs\": [{\"pmid\": null, \"note\": null}]\n"
         "    }\n"
         "  ]\n"
         "}\n\n"
-        f"MUTATION: {mutation}\n\n"
-        "If you cannot support the mutation with a grounded quote in the LOCAL_CONTEXT, return an empty sequence_features list.\n\n"
+        f"TOKEN: {target_token}\n\n"
+        "If you cannot support the TOKEN with a grounded quote in LOCAL_CONTEXT, return an empty sequence_features list.\n\n"
         "LOCAL_CONTEXT:\n" + local_context
     )
-    return sys + "\n\n" + usr
+    return sys + "\\n\\n" + usr
+
 
 # ===== Gemini wrapper (with 429-aware retries + RPM/TPM gates) =====
 def _parse_retry_delay_seconds(err_text: str) -> int:
@@ -261,9 +278,12 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
 
     paper_text = _normalize_ws(paper_text)
 
-    # Pass 1: enumerate mutations over chunks
-    mutations: List[str] = []
-    seen = set()
+    # ---------- Pass 1: enumerate tokens over chunks ----------
+    # We collect three categories: mutations, proteins, amino_acids.
+    # 'seen' dedupes across all categories by literal token string.
+    tokens: List[Tuple[str, str]] = []  # (token_type, token)
+    seen: set[str] = set()
+
     for chunk in _chunk_text(paper_text, max_chars=chunk_chars, overlap=overlap_chars):
         prompt = _pass1_prompt(chunk)
         try:
@@ -271,35 +291,64 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         except Exception:
             # Skip this chunk if model hiccups
             continue
-        j1 = _safe_json_loads(raw1) or {"mutations": []}
-        for m in j1.get("mutations") or []:
+
+        j1 = _safe_json_loads(raw1) or {"mutations": [], "proteins": [], "amino_acids": []}
+
+        # Mutations
+        for m in (j1.get("mutations") or []):
             if isinstance(m, str):
                 t = m.strip()
                 if t and t not in seen:
-                    seen.add(t); mutations.append(t)
+                    seen.add(t)  
+                    tokens.append(("mutation", t))
+
+        # Proteins
+        for p in (j1.get("proteins") or []):
+            if isinstance(p, str):
+                t = p.strip()
+                if t and t not in seen:
+                    seen.add(t)
+                    tokens.append(("protein", t))
+
+        # Amino acids
+        for aa in (j1.get("amino_acids") or []):
+            if isinstance(aa, str):
+                t = aa.strip()
+                if t and t not in seen:
+                    seen.add(t)
+                    tokens.append(("amino_acid", t))
+
         if delay_ms:
             time.sleep(delay_ms / 1000.0)
 
-    # Pass 2: attribution per mutation
+    # ---------- Pass 2: attribution per token (token-agnostic) ----------
     seq_feats: List[Dict[str, Any]] = []
-    for m in mutations:
+
+    for tok_type, tok in tokens:
+        # Reuse the same local-windowing helper (name mentions 'mutation' but it’s just string-based).
         local_ctx = _windows_for_mutation(
-            paper_text, m, left=900, right=900, max_windows=6, max_total_chars=min(12000, chunk_chars)
+            paper_text, tok,
+            left=900, right=900, max_windows=6, max_total_chars=min(12000, chunk_chars)
         )
-        prompt2 = _pass2_prompt(local_ctx, m, pmid, pmcid)
+        prompt2 = _pass2_prompt(local_ctx, tok, pmid, pmcid)
         try:
             raw2 = _gemini_complete(prompt2, max_output_tokens=1200)
         except Exception:
             # Try smaller window on failure
-            local_ctx = _windows_for_mutation(paper_text, m, left=600, right=600, max_windows=4, max_total_chars=7000)
-            prompt2 = _pass2_prompt(local_ctx, m, pmid, pmcid)
+            local_ctx = _windows_for_mutation(
+                paper_text, tok, left=600, right=600, max_windows=4, max_total_chars=7000
+            )
+            prompt2 = _pass2_prompt(local_ctx, tok, pmid, pmcid)
             raw2 = _gemini_complete(prompt2, max_output_tokens=900)
 
         j2 = _safe_json_loads(raw2) or {}
         feats = (j2.get("sequence_features") or []) if isinstance(j2, dict) else []
         for f in feats:
             if isinstance(f, dict):
+                # Optionally annotate the detected type for downstream filters
+                f.setdefault("target_type", tok_type)
                 seq_feats.append(f)
+
         if delay_ms:
             time.sleep(delay_ms / 1000.0)
 
@@ -307,6 +356,7 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         "paper": {"pmid": pmid, "pmcid": pmcid, "title": None, "virus_candidates": [], "protein_candidates": []},
         "sequence_features": seq_feats
     }
+
 
 # ===== Cleaner (same math as llm_groq.clean_and_ground) =====
 def clean_and_ground(raw: Dict[str, Any],
@@ -325,40 +375,58 @@ def clean_and_ground(raw: Dict[str, Any],
     for f in feats:
         if not isinstance(f, dict):
             continue
-        mut = (f.get("mutation") or "").strip()
-        if not mut:
+
+        # Prefer the explicit target_token; otherwise fall back to mutation
+        token = (f.get("target_token") or f.get("mutation") or "").strip()
+        if not token:
             continue
 
+        # Quote grounding: at least one short quote appears verbatim in the paper
         quotes = [q for q in (f.get("evidence_quotes") or []) if isinstance(q, str) and q.strip()]
         quote_ok = False
         if quotes and isinstance(full_text, str):
             for q in quotes:
                 ql = _normalize_ws(q).lower()
-                if ql in norm_text and (not require_mutation_in_quote or (mut.lower() in ql)):
+                # If require_mutation_in_quote is set, interpret it as "the token must be present"
+                if ql in norm_text and (not require_mutation_in_quote or (token.lower() in ql)):
                     quote_ok = True
                     break
         if not quote_ok:
             continue
 
+        # Normalize effect category
         cat = (f.get("effect_category") or "").strip()
-        if cat not in _ALLOWED_CATEGORIES:
+        if cat and cat not in _ALLOWED_CATEGORIES:
             f["effect_category"] = "other"
 
+        # Simple confidence heuristic (unchanged)
         conf = 0.0
         if quotes: conf += 0.6
-        if isinstance(f.get("position"), int): conf += 0.1
+        # position may be str or int; count it if it’s an integer-like
+        pos = f.get("position")
+        try:
+            if isinstance(pos, int) or (isinstance(pos, str) and pos.strip().isdigit()):
+                conf += 0.1
+        except Exception:
+            pass
         ctx = f.get("experiment_context") or {}
         if any(ctx.get(k) for k in ("system", "assay", "temperature")): conf += 0.1
         if f.get("effect_category"): conf += 0.1
-        conf = min(conf, 1.0)
+        f["confidence"] = min(conf, 1.0)
 
-        if conf < float(min_confidence or 0.0):
+        if f["confidence"] < float(min_confidence or 0.0):
             continue
 
-        f["confidence"] = conf
+        # Back-compat: if this is a non-mutation token, keep fields consistent
+        # so old consumers that expect "mutation" don’t break.
+        if not f.get("mutation") and f.get("target_token"):
+            if f.get("target_type") == "mutation":
+                f["mutation"] = f["target_token"]
+
         kept.append(f)
 
     return {"paper": paper, "sequence_features": kept}
+
 
 __all__ = [
     "run_on_paper",

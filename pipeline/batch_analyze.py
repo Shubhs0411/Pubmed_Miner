@@ -145,9 +145,10 @@ def flatten_to_rows(batch: Dict[str, Dict]) -> pd.DataFrame:
     """
     Convert batch LLM outputs into a row-per-finding table.
 
-    Columns:
+    Columns (legacy kept; new fields appended):
       pmid, pmcid, title, virus, source_strain, protein, mutation, position,
-      effect_category, confidence, effect_summary, quote_1, quote_2
+      effect_category, confidence, effect_summary, quote_1, quote_2,
+      target_token, target_type, residue, system, assay, temperature
     """
     rows: List[Dict] = []
     for pmid, entry in batch.items():
@@ -159,23 +160,61 @@ def flatten_to_rows(batch: Dict[str, Dict]) -> pd.DataFrame:
 
         seq = (entry.get("result", {}) or {}).get("sequence_features", []) or []
         for f in seq:
-            quotes = [q for q in (f.get("evidence_quotes") or []) if isinstance(q, str)]
+            quotes = [q for q in (f.get("evidence_quotes") or []) if isinstance(q, str) and q.strip()]
             q1 = quotes[0] if len(quotes) > 0 else ""
             q2 = quotes[1] if len(quotes) > 1 else ""
 
+            # Prefer explicit token fields (new) but keep legacy ones for compatibility
+            target_token = (f.get("target_token") or f.get("mutation") or "") or ""
+            target_type  = (f.get("target_type") or ("mutation" if f.get("mutation") else None)) or ""
+
+            # Residue & position normalization (position may be str or int)
+            residue = f.get("residue") or ""
+            pos_val = f.get("position")
+            try:
+                if isinstance(pos_val, str) and pos_val.strip().isdigit():
+                    pos_val = int(pos_val.strip())
+            except Exception:
+                pass  # leave as-is if not cleanly castable
+
+            ctx = f.get("experiment_context") or {}
+            system = ctx.get("system") or ""
+            assay = ctx.get("assay") or ""
+            temperature = ctx.get("temperature") or ""
+
             rows.append({
+                # Paper meta
                 "pmid": pmid,
                 "pmcid": pmcid or "",
                 "title": title or "",
+
+                # Associations (may be empty)
                 "virus": f.get("virus") or "",
                 "source_strain": f.get("source_strain") or "",
                 "protein": f.get("protein") or "",
+
+                # Legacy mutation-centric fields (kept)
                 "mutation": f.get("mutation") or "",
-                "position": f.get("position"),
+                "position": pos_val,
+
+                # Effects & quality
                 "effect_category": f.get("effect_category") or "",
                 "confidence": f.get("confidence"),
                 "effect_summary": f.get("effect_summary") or "",
+
+                # Evidence
                 "quote_1": q1,
                 "quote_2": q2,
+
+                # New token-agnostic fields
+                "target_token": target_token,
+                "target_type": target_type,
+                "residue": residue,
+
+                # Experimental context (handy for filtering)
+                "system": system,
+                "assay": assay,
+                "temperature": temperature,
             })
+
     return pd.DataFrame(rows)
