@@ -1,5 +1,5 @@
 # llm_gemini.py
-# Two-pass, LLM-only mutation miner using Google Gemini (drop-in replacement for llm_groq.py)
+# Two-pass, LLM-only mutation/protein miner using Google Gemini (drop-in replacement for llm_groq.py)
 # Public API kept identical: run_on_paper(paper_text, meta) and clean_and_ground(raw, full_text, ...)
 from __future__ import annotations
 
@@ -146,22 +146,18 @@ def _safe_json_loads(raw: str) -> Optional[dict]:
                 return None
     return None
 
-# ===== Prompts (kept aligned with your llm_groq.py) =====
+# ===== Prompts (generalized to mutations + proteins + amino_acids) =====
 def _pass1_prompt(paper_text: str) -> str:
     sys = (
-        "You extract sequence-related tokens from biomedical papers.\n"
-        "Return ONLY normalized tokens that occur in the text, no commentary.\n"
-        "Token types and normalization rules:\n"
-        "  • mutations: concise forms such as N501Y, D125A, K70*, del69-70, aa1396-1435, p.Asp125Ala, insA/insAla.\n"
-        "  • proteins: gene/protein symbols or names (e.g., BRCA1, NS1, E, Spike glycoprotein, RdRp).\n"
-        "  • amino_acids: amino-acid mentions as residue tokens when possible (e.g., K417, Lys417, p.Lys417,\n"
-        "    Ser315, S315) or bare names (Lysine, Ser) if no position is given.\n"
-        "Include items even if they are not associated with any gene/disease/effect in the paper.\n"
+         "You extract mutation, protein, and amino-acid tokens from biomedical papers.\n"
+        "Return ONLY tokens that occur verbatim in the text (case-insensitive), no commentary.\n"
+        "Normalize mutation tokens to concise forms such as N501Y, D125A, K70*, del69-70, aa1396-1435, p.Asp125Ala, insA/insAla.\n"
+        "Protein tokens should be short gene/protein names (e.g., NS1, Mpro, RdRp, Spike, E, ORF3a, N), not sentences.\n"
         "Output STRICT JSON only:\n"
         "{\n"
-        "  \"mutations\":   [\"<token>\", ...],\n"
-        "  \"proteins\":    [\"<token>\", ...],\n"
-        "  \"amino_acids\": [\"<token>\", ...]\n"
+        "  \"mutations\": [\"<mut1>\", \"<mut2>\"],\n"
+        "  \"proteins\": [\"<prot1>\", \"<prot2>\"],\n"
+        "  \"amino_acids\": [\"<aa1>\", \"<aa2>\"]\n"
         "}"
     )
     usr = (
@@ -169,47 +165,66 @@ def _pass1_prompt(paper_text: str) -> str:
         "Keep unique items, preserve canonical form, and ignore background organisms unless the token is explicitly stated.\n\n"
         "PAPER_TEXT:\n" + paper_text
     )
-    return sys + "\\n\\n" + usr
+    return sys + "\n\n" + usr
 
 
-def _pass2_prompt(local_context: str, target_token: str, pmid: Optional[str], pmcid: Optional[str]) -> str:
+def _pass2_prompt(local_context: str,
+                  token: str,
+                  pmid: Optional[str],
+                  pmcid: Optional[str],
+                  tok_type: str) -> str:
     sys = (
-        "You attribute a given biomedical TOKEN using ONLY the provided context from this paper.\n"
-        "The TOKEN may be a mutation, a protein/gene, or an amino-acid residue mention.\n"
-        "Be concise and specific. Provide 1–2 short quotes (≤ ~20 words each) that appear verbatim; "
-        "at least one quote must include the exact TOKEN string. Use the controlled effect categories when applicable."
+        "You attribute a given target token to virus, strain/lineage, protein, and effect using ONLY the provided context from this paper.\n"
+        "Be concise and specific. Provide 1–2 short quotes (≤ ~20 words each) that appear verbatim in the context. "
+        "Use the controlled set of effect categories."
     )
+
+    if tok_type == "mutation":
+        quote_rule = (
+            "At least one quote MUST contain the exact mutation token.\n"
+            "If you cannot support the mutation with a grounded quote in the LOCAL_CONTEXT, return an empty sequence_features list."
+        )
+        mutation_field = json.dumps(token)
+        protein_hint = "<protein or gene symbol>"
+    else:
+        # protein / amino_acid
+        quote_rule = (
+            "At least one quote MUST contain the exact target token. "
+            "If you cannot support the target with a grounded quote in the LOCAL_CONTEXT, return an empty sequence_features list."
+        )
+        mutation_field = "null"           # allow protein-level findings with no explicit mutation
+        protein_hint = token              # bias attribution to this protein
+
     usr = (
-        "Given the LOCAL_CONTEXT (excerpts from the paper) and the target TOKEN, extract one structured item.\n"
-        "If the paper does not state an association (e.g., no disease/effect/protein linkage), still return an item with nulls.\n"
+        "Given the LOCAL_CONTEXT (excerpts from the paper) and the target, extract one structured item.\n"
         "STRICT JSON only:\n"
         "{\n"
         f"  \"paper\": {{\"pmid\": {json.dumps(pmid)}, \"pmcid\": {json.dumps(pmcid)}, \"title\": null,\n"
         "             \"virus_candidates\": [], \"protein_candidates\": []},\n"
         "  \"sequence_features\": [\n"
         "    {\n"
-        "      \"target_token\": " + json.dumps(target_token) + ",\n"
-        "      \"target_type\": \"<mutation|protein|amino_acid>\",\n"
         "      \"virus\": \"<organism or null>\",\n"
         "      \"source_strain\": \"<serotype/lineage/strain or null>\",\n"
-        "      \"protein\": \"<protein or gene symbol or null>\",\n"
-        "      \"mutation\": \"<mutation token or null>\",\n"
-        "      \"residue\": \"<amino-acid residue token or null>\",\n"
+        f"      \"protein\": \"{protein_hint}\",\n"
+        f"      \"mutation\": {mutation_field},\n"
         "      \"position\": \"<integer or null>\",\n"
-        "      \"effect_category\": \"<RNA_synthesis|virion_assembly|binding|replication|infectivity|virulence|immune_evasion|drug_interaction|temperature_sensitivity|activity_change|modification|other|null>\",\n"
-        "      \"effect_summary\": \"<1-2 sentences specific to this paper or null>\",\n"
+        "      \"effect_category\": \"<RNA_synthesis|virion_assembly|binding|replication|infectivity|virulence|immune_evasion|drug_interaction|temperature_sensitivity|activity_change|modification|other>\",\n"
+        "      \"effect_summary\": \"<1-2 sentences specific to this paper>\",\n"
         "      \"mechanism_hypothesis\": \"<brief or null>\",\n"
-        "      \"experiment_context\": {\"system\": \"<cell/animal/in vitro/in silico or null>\", \"assay\": \"<method or null>\", \"temperature\": \"<value or null>\"},\n"
+        "      \"experiment_context\": {\"system\": \"<cell/animal/in vitro/in silico>\", \"assay\": \"<method>\", \"temperature\": \"<value or null>\"},\n"
         "      \"evidence_quotes\": [\"<short quote 1>\", \"<short quote 2>\"],\n"
-        "      \"cross_refs\": [{\"pmid\": null, \"note\": null}]\n"
+        "      \"cross_refs\": [{\"pmid\": null, \"note\": null}],\n"
+        f"      \"target_token\": {json.dumps(token)},\n"
+        f"      \"target_type\": {json.dumps(tok_type)}\n"
         "    }\n"
         "  ]\n"
         "}\n\n"
-        f"TOKEN: {target_token}\n\n"
-        "If you cannot support the TOKEN with a grounded quote in LOCAL_CONTEXT, return an empty sequence_features list.\n\n"
+        f"TARGET_TOKEN: {token}\n"
+        f"TARGET_TYPE: {tok_type}\n\n"
+        f"{quote_rule}\n\n"
         "LOCAL_CONTEXT:\n" + local_context
     )
-    return sys + "\\n\\n" + usr
+    return sys + "\n\n" + usr
 
 
 # ===== Gemini wrapper (with 429-aware retries + RPM/TPM gates) =====
@@ -230,6 +245,7 @@ def _parse_retry_delay_seconds(err_text: str) -> int:
     # Fallback for per-minute limits
     return 60
 
+
 def _gemini_complete(prompt_text: str, max_output_tokens: int) -> str:
     # Soft gates to avoid hitting 429 in the first place
     est = _approx_tokens(prompt_text) + int(max_output_tokens or 0)
@@ -243,11 +259,15 @@ def _gemini_complete(prompt_text: str, max_output_tokens: int) -> str:
             resp = _model.generate_content(
                 contents=prompt_text,
                 generation_config=genai.types.GenerationConfig(
-                    temperature=0.2,
+                    temperature=0.0,          # clamp sampling
+                    top_p=1.0,
+                    top_k=1,
+                    candidate_count=1,
                     max_output_tokens=max_output_tokens,
                     response_mime_type="text/plain",
                 )
             )
+
             return (resp.text or "").strip()
         except Exception as e:
             msg = str(e) or ""
@@ -299,7 +319,7 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
             if isinstance(m, str):
                 t = m.strip()
                 if t and t not in seen:
-                    seen.add(t)  
+                    seen.add(t)
                     tokens.append(("mutation", t))
 
         # Proteins
@@ -325,12 +345,12 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
     seq_feats: List[Dict[str, Any]] = []
 
     for tok_type, tok in tokens:
-        # Reuse the same local-windowing helper (name mentions 'mutation' but it’s just string-based).
+        # Reuse the same local-windowing helper (name mentions 'mutation' but it’s string-based).
         local_ctx = _windows_for_mutation(
             paper_text, tok,
             left=900, right=900, max_windows=6, max_total_chars=min(12000, chunk_chars)
         )
-        prompt2 = _pass2_prompt(local_ctx, tok, pmid, pmcid)
+        prompt2 = _pass2_prompt(local_ctx, tok, pmid, pmcid, tok_type)
         try:
             raw2 = _gemini_complete(prompt2, max_output_tokens=1200)
         except Exception:
@@ -338,14 +358,15 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
             local_ctx = _windows_for_mutation(
                 paper_text, tok, left=600, right=600, max_windows=4, max_total_chars=7000
             )
-            prompt2 = _pass2_prompt(local_ctx, tok, pmid, pmcid)
+            prompt2 = _pass2_prompt(local_ctx, tok, pmid, pmcid, tok_type)
             raw2 = _gemini_complete(prompt2, max_output_tokens=900)
 
         j2 = _safe_json_loads(raw2) or {}
         feats = (j2.get("sequence_features") or []) if isinstance(j2, dict) else []
         for f in feats:
             if isinstance(f, dict):
-                # Optionally annotate the detected type for downstream filters
+                # Ensure target fields exist for downstream filters
+                f.setdefault("target_token", tok)
                 f.setdefault("target_type", tok_type)
                 seq_feats.append(f)
 
@@ -358,13 +379,22 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
     }
 
 
-# ===== Cleaner (same math as llm_groq.clean_and_ground) =====
+# ===== Cleaner (same math as llm_groq.clean_and_ground, generalized token rule) =====
 def clean_and_ground(raw: Dict[str, Any],
                      full_text: str,
                      *,
                      restrict_to_paper: bool = True,
                      require_mutation_in_quote: bool = True,
+                     require_target_in_quote: Optional[bool] = None,
                      min_confidence: float = 0.0) -> Dict[str, Any]:
+    """
+    Back-compat:
+      - 'require_mutation_in_quote' retained.
+      - New 'require_target_in_quote' (generic) defaults to the legacy flag if not provided.
+    """
+    if require_target_in_quote is None:
+        require_target_in_quote = require_mutation_in_quote
+
     paper = (raw or {}).get("paper") or {
         "pmid": None, "pmcid": None, "title": None, "virus_candidates": [], "protein_candidates": []
     }
@@ -387,8 +417,8 @@ def clean_and_ground(raw: Dict[str, Any],
         if quotes and isinstance(full_text, str):
             for q in quotes:
                 ql = _normalize_ws(q).lower()
-                # If require_mutation_in_quote is set, interpret it as "the token must be present"
-                if ql in norm_text and (not require_mutation_in_quote or (token.lower() in ql)):
+                # If require_target_in_quote is set, the exact token must be present in the grounded quote
+                if ql in norm_text and (not require_target_in_quote or (token.lower() in ql)):
                     quote_ok = True
                     break
         if not quote_ok:
@@ -399,7 +429,7 @@ def clean_and_ground(raw: Dict[str, Any],
         if cat and cat not in _ALLOWED_CATEGORIES:
             f["effect_category"] = "other"
 
-        # Simple confidence heuristic (unchanged)
+        # Simple confidence heuristic
         conf = 0.0
         if quotes: conf += 0.6
         # position may be str or int; count it if it’s an integer-like
@@ -412,6 +442,11 @@ def clean_and_ground(raw: Dict[str, Any],
         ctx = f.get("experiment_context") or {}
         if any(ctx.get(k) for k in ("system", "assay", "temperature")): conf += 0.1
         if f.get("effect_category"): conf += 0.1
+
+        # Slight boost for grounded protein-level items with no explicit mutation
+        if f.get("mutation") in (None, "",) and f.get("target_type") == "protein":
+            conf = min(1.0, conf + 0.1)
+
         f["confidence"] = min(conf, 1.0)
 
         if f["confidence"] < float(min_confidence or 0.0):

@@ -198,23 +198,23 @@ def flatten_to_rows(batch: Dict[str, Dict]) -> pd.DataFrame:
                 "position": pos_val,
 
                 # Effects & quality
-                "effect_category": f.get("effect_category") or "",
+                # "effect_category": f.get("effect_category") or "",
                 "confidence": f.get("confidence"),
-                "effect_summary": f.get("effect_summary") or "",
+                # "effect_summary": f.get("effect_summary") or "",
 
                 # Evidence
                 "quote_1": q1,
                 "quote_2": q2,
 
                 # New token-agnostic fields
-                "target_token": target_token,
+                # "target_token": target_token,
                 "target_type": target_type,
-                "residue": residue,
+                # "residue": residue,
 
-                # Experimental context (handy for filtering)
-                "system": system,
-                "assay": assay,
-                "temperature": temperature,
+                # # Experimental context (handy for filtering)
+                # "system": system,
+                # "assay": assay,
+                # "temperature": temperature,
             })
 
     return pd.DataFrame(rows)
