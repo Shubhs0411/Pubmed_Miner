@@ -1,126 +1,96 @@
-# PubMed Review Miner (Streamlit)
+# PubMed Miner
 
-Search PubMed for **Review** articles, fetch **PMC** full text, and run a two‑pass Gemini extractor to mine mutation/protein findings. The app is built with **Streamlit** and a small pipeline around PubMed E‑utilities + PMC HTML parsing.
-
-![Folder structure](assets/folder-structure.png)
+A Streamlit app to search **PubMed** for review articles, fetch **PMC** full text (when available), and run a **Gemini**-powered extractor to mine mutation/protein findings with grounded snippets.
 
 ---
 
-## Features (high level)
-- PubMed search restricted to **Review** articles, with robust date handling and pagination.
-- Fetch **PMC** full text (when available) and gracefully handle **embargo/403** and **rate limits**.
-- Two‑pass **Gemini** pipeline: enumerate tokens (mutations/proteins/amino acids) then attribute/ground with short quotes.
-- Streamlit UI: search → select PMIDs → fetch full text → run LLM → view/download **findings CSV** and **raw JSON**.
-- Optional publisher fallback metadata via **Unpaywall** when PMC is unavailable.
+## Quick Start
 
-> Key modules: `services/pubmed.py`, `pipeline/batch_analyze.py`, `extractor.py`, `llm_gemini.py`, and `app.py`.
-
----
-
-## Quickstart
-
-### 1) Clone & create a virtual environment
+### 1) Clone the repo
 ```bash
-# Clone your fork
-git clone <your-fork-url> PUBMED_MINER
-cd PUBMED_MINER
+git clone https://github.com/Shubhs0411/Pubmed_Miner.git
+cd Pubmed_Miner
+```
 
-# Create & activate a virtual environment (pick one)
+### 2) Create & activate a virtual environment
+```bash
 python -m venv .venv
-# Windows PowerShell
+
+# Windows (PowerShell)
 .\.venv\Scripts\Activate.ps1
+
 # macOS/Linux
 source .venv/bin/activate
 ```
 
-### 2) Install Python dependencies
+### 3) Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-> If you don’t have a `requirements.txt`, the core packages are roughly:
-> `streamlit pandas python-dotenv requests urllib3 beautifulsoup4 google-generativeai`
-
-### 3) Create a `.env` file (API keys & pacing)
-Create a file named `.env` in the project root with at least your Gemini key. Reasonable free‑tier defaults are shown below—you can tune later.
+### 4) Configure environment variables
+Create a **.env** file in the project root with the following keys (adjust values as needed).
 
 ```dotenv
-# --- required ---
-GEMINI_API_KEY=""
+# Required
+GEMINI_API_KEY="PUT_YOUR_KEY_HERE"
 
-# --- soft rate limits (tune for your account tier) ---
-# requests per minute and tokens per minute for Gemini
+# Soft rate limits for Gemini (you can tune these if you hit quota)
 GEMINI_RPM=10
 GEMINI_TPM=180000
 
-# pause between papers in the batch pipeline (seconds)
+# Pause between papers in the batch pipeline (seconds)
 PAPER_PAUSE_SEC=3.0
-
-# --- optional but recommended ---
-# Improves PubMed reliability when searching/fetching
-NCBI_API_KEY=""
-
-# Identifies your requests to NCBI (used in request headers)
-CONTACT_EMAIL="you@example.com"
-
-# Enables publisher access checks when PMC is not available
-UNPAYWALL_EMAIL="you@example.com"
-
-# If you want to try a Groq-based LLM (not required for Gemini path)
-GROQ_API_KEY=""
 ```
 
-### 4) Run the Streamlit app
+> Tip: You can export these as real environment variables instead of using `.env` if you prefer.
+
+### 5) Run the app
 ```bash
 streamlit run app.py
 ```
-Then open the URL Streamlit prints (usually `http://localhost:8501`).
+Open the URL that Streamlit prints (usually `http://localhost:8501`).
 
 ---
 
-## How the pieces fit
+## Sample PubMed Query
 
-- **PubMed search & date parsing** – robust E‑utilities wrapper with tolerant JSON parsing and date‑range filtering in the app (see `services/pubmed.py`).  
-- **Fetching PMC full text** – maps PMID⇄PMCID, scrapes PMC HTML, strips figures/tables/nav to plain text; handles embargo/403 and retryable errors (see `extractor.py`).  
-- **Batch pipeline** – fetch all full texts for selected PMIDs, then analyze each paper; includes pacing between papers via `PAPER_PAUSE_SEC` (see `pipeline/batch_analyze.py`).  
-- **Gemini two‑pass extractor** – token enumeration over chunks → token‑focused attribution with grounded quotes, with soft RPM/TPM gates; configure via `.env` (see `llm_gemini.py`).  
-- **Streamlit UI** – one‑page app to search, select, fetch, inspect full text, run the LLM, and download results (see `app.py`).
+When the app starts, you can try a query like:
+
+```
+((Dengue[Title]) AND (protein)) AND ((active site[Text Word]) OR (mutation[Text Word]))
+```
+
+This will search for Dengue-related protein review literature mentioning an active site or mutations.
 
 ---
 
-## Usage tips
+## How to Use
 
-- Start with a narrow PubMed query (e.g., a virus and “mutation”) and a smaller date range, then scale up.
-- If you see rate‑limit messages from Gemini, lower `GEMINI_RPM` / `GEMINI_TPM` in `.env` or widen pauses.
-- If some PMIDs show “no PMC full text,” they may be **embargoed** or not deposited in PMC. The app surfaces these and still lets you download whatever was fetched for others.
-- Set `NCBI_API_KEY` to reduce throttling when doing large searches.
+1. **Search PubMed** – Enter your query and press search.
+2. **Select PMIDs** – Choose papers to include in analysis.
+3. **Fetch Full Text** – The app tries to pull **PMC** full text (if available).
+4. **Run Extraction** – Use the Gemini-based pipeline to enumerate tokens and attribute them with short, grounded quotes.
+5. **Review & Export** – Inspect results in the UI; download CSV/JSON as needed.
 
 ---
 
 ## Troubleshooting
 
-- **`RuntimeError: GEMINI_API_KEY not set`** – you must put your key in `.env` (or environment) before running.
-- **429 / quota or 5xx from Gemini** – the pipeline implements soft gates and retries; reduce `GEMINI_RPM/TMP`, increase `PAPER_PAUSE_SEC`, or try again.
-- **`pmc_embargo_or_blocked`** – PMC exists but access is blocked (often an embargo). The tool records PMCID and skips text.
+- **`GEMINI_API_KEY not set`** – Add your key to `.env` (or export as an environment variable) and restart.
+- **Rate limit/quota errors** – Lower `GEMINI_RPM` and/or `GEMINI_TPM`, or increase `PAPER_PAUSE_SEC`.
+- **Some PMIDs show no PMC text** – The paper may be embargoed or not deposited in PMC; the app will still process available items.
 
 ---
 
-## Minimal programmatic example
+## Notes
 
-If you prefer Python over the UI, you can fetch and analyze a small list of PMIDs like so:
-
-```python
-from pipeline.batch_analyze import fetch_all_fulltexts, analyze_texts, flatten_to_rows
-
-pmids = ["12345678", "34567890"]
-papers = fetch_all_fulltexts(pmids, delay_ms=200)
-results = analyze_texts(papers, virus_filter="Dengue virus", protein_filter="protein")
-df = flatten_to_rows(results)
-print(df.head())
-```
+- The app focuses on **Review** articles and handles date filters and pagination.
+- Fetching relies on PMC availability; for non-PMC papers, full text may not be obtainable.
+- The extractor runs in two passes to improve grounding and precision.
 
 ---
 
 ## License
-MIT (or your preferred license).
 
+MIT (update as you prefer).
