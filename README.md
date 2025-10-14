@@ -6,6 +6,12 @@ A Streamlit app to search **PubMed** for review articles, fetch **PMC** full tex
 
 ## Quick Start
 
+### Prerequisites
+- **Python 3.11+** (tested with Python 3.11.8)
+- **Operating System**: Windows, macOS, or Linux
+- **Memory**: 4GB+ RAM recommended
+- **Internet**: Required for API calls and PMC fetching
+
 ### 1) Clone the repo
 ```bash
 git clone https://github.com/Shubhs0411/Pubmed_Miner.git
@@ -14,10 +20,15 @@ cd Pubmed_Miner
 
 ### 2) Create & activate a virtual environment
 ```bash
+# Create virtual environment
 python -m venv .venv
 
+# Activate virtual environment
 # Windows (PowerShell)
 .\.venv\Scripts\Activate.ps1
+
+# Windows (Command Prompt)
+.\.venv\Scripts\activate.bat
 
 # macOS/Linux
 source .venv/bin/activate
@@ -25,31 +36,53 @@ source .venv/bin/activate
 
 ### 3) Install dependencies
 ```bash
+# Install core dependencies
 pip install -r requirements.txt
+
+# Optional: Install additional ML libraries if needed
+# pip install torch transformers huggingface-hub
 ```
 
 ### 4) Configure environment variables
-Create a **.env** file in the project root with the following keys (adjust values as needed).
+Create a **.env** file in the project root with the following keys:
 
 ```dotenv
-# Required
-GEMINI_API_KEY="PUT_YOUR_KEY_HERE"
+# Required: Choose ONE LLM backend
+GEMINI_API_KEY="your_gemini_api_key_here"
+# OR
+GROQ_API_KEY="your_groq_api_key_here"
 
-# Soft rate limits for Gemini (you can tune these if you hit quota)
+# Optional: NCBI API key for higher rate limits
+NCBI_API_KEY="your_ncbi_api_key_here"
+
+# Optional: Rate limiting (adjust if you hit quotas)
 GEMINI_RPM=10
 GEMINI_TPM=180000
-
-# Pause between papers in the batch pipeline (seconds)
 PAPER_PAUSE_SEC=3.0
+
+# Optional: Contact info for NCBI
+CONTACT_EMAIL="your_email@example.com"
 ```
 
-> Tip: You can export these as real environment variables instead of using `.env` if you prefer.
+> **Note**: You can export these as environment variables instead of using `.env` if you prefer.
 
 ### 5) Run the app
 ```bash
+# Method 1: Using the root shim (recommended)
 streamlit run app.py
+
+# Method 2: Direct execution
+streamlit run app/app.py
 ```
+
 Open the URL that Streamlit prints (usually `http://localhost:8501`).
+
+### 6) Verify installation
+The app should display:
+- ✅ PubMed Review Miner title
+- ✅ LLM Settings sidebar
+- ✅ Query input area
+- ✅ Date range selector
 
 ---
 
@@ -57,7 +90,9 @@ Open the URL that Streamlit prints (usually `http://localhost:8501`).
 
 ```
 Pubmed_Miner/
-├─ app.py                 # Streamlit UI
+├─ app/
+│  └─ app.py              # Streamlit UI entrypoint
+├─ app.py                 # shim that runs app/app.py for convenience
 ├─ services/
 │  ├─ pubmed.py           # PubMed search, summaries, date utils
 │  └─ pmc.py              # PMC fetching (JATS-first with HTML fallback)
@@ -102,9 +137,36 @@ This will search for Dengue-related protein review literature mentioning an acti
 
 ## Troubleshooting
 
-- **`GEMINI_API_KEY not set`** – Add your key to `.env` (or export as an environment variable) and restart.
-- **Rate limit/quota errors** – Lower `GEMINI_RPM` and/or `GEMINI_TPM`, or increase `PAPER_PAUSE_SEC`.
-- **Some PMIDs show no PMC text** – The paper may be embargoed or not deposited in PMC; the app will still process available items.
+### Common Issues
+
+**`GEMINI_API_KEY not set` or `GROQ_API_KEY not set`**
+- Add your API key to `.env` file or export as environment variable
+- Restart the app after adding the key
+
+**Rate limit/quota errors**
+- Lower `GEMINI_RPM` and/or `GEMINI_TPM` in `.env`
+- Increase `PAPER_PAUSE_SEC` for slower processing
+- Get an NCBI API key for higher rate limits
+
+**Some PMIDs show no PMC text**
+- The paper may be embargoed or not deposited in PMC
+- The app will still process available items
+
+**Import errors or missing modules**
+- Ensure you're using Python 3.11+
+- Reinstall dependencies: `pip install -r requirements.txt`
+- Check virtual environment is activated
+
+**Blank page or app won't start**
+- Try: `streamlit run app/app.py` directly
+- Check console for error messages
+- Ensure all dependencies are installed
+
+### System Requirements
+- **Python**: 3.11+ (tested with 3.11.8)
+- **RAM**: 4GB+ recommended
+- **Storage**: 2GB+ free space
+- **OS**: Windows 10+, macOS 10.15+, or Linux (Ubuntu 20.04+)
 
 ---
 
