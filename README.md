@@ -4,15 +4,35 @@ A Streamlit app to search **PubMed** for review articles, fetch **PMC** full tex
 
 ---
 
-## Quick Start
+## 🚀 Choose Your Setup Method
 
-### Prerequisites
+### Option 1: Traditional Python Setup
+For developers who want to run the app directly with Python and have full control over the environment.
+
+### Option 2: Docker Setup (Recommended)
+For users who want a consistent, isolated environment that works the same on any system.
+
+---
+
+## 📋 Prerequisites
+
+### For Python Setup
 - **Python 3.11+** (tested with Python 3.11.8)
 - **Operating System**: Windows, macOS, or Linux
 - **Memory**: 4GB+ RAM recommended
 - **Internet**: Required for API calls and PMC fetching
 
-### Python Version Setup
+### For Docker Setup
+- **Docker** 20.10+ and **Docker Compose** 2.0+
+- **Git** for cloning the repository
+- **Memory**: 4GB+ RAM recommended
+- **Internet**: Required for API calls and PMC fetching
+
+---
+
+## 🐍 Option 1: Traditional Python Setup
+
+### Step 1: Python Version Setup
 
 #### Check your Python version:
 ```bash
@@ -47,13 +67,13 @@ sudo apt install python3.11 python3.11-venv python3.11-pip
 sudo yum install python3.11 python3.11-venv python3.11-pip
 ```
 
-### 1) Clone the repo
+### Step 2: Clone the repository
 ```bash
 git clone https://github.com/Shubhs0411/Pubmed_Miner.git
 cd Pubmed_Miner
 ```
 
-### 2) Create & activate a virtual environment
+### Step 3: Create & activate virtual environment
 
 #### Create virtual environment:
 ```bash
@@ -92,7 +112,7 @@ which python
 deactivate
 ```
 
-### 3) Install dependencies
+### Step 4: Install dependencies
 ```bash
 # Install core dependencies
 pip install -r requirements.txt
@@ -101,7 +121,7 @@ pip install -r requirements.txt
 # pip install torch transformers huggingface-hub
 ```
 
-### 4) Configure API keys
+### Step 5: Configure API keys
 
 #### Required: Get a Gemini API Key
 1. Go to [Google AI Studio](https://aistudio.google.com/)
@@ -109,16 +129,17 @@ pip install -r requirements.txt
 3. Click "Get API key" → "Create API key"
 4. Copy the generated key
 
-#### Optional: Get an NCBI API Key (Recommended)
+#### Required: Get an NCBI API Key
 1. Go to [NCBI API Key Registration](https://www.ncbi.nlm.nih.gov/account/settings/)
 2. Sign in to your NCBI account (create one if needed)
 3. Go to "API Key Management" → "Create API Key"
 4. Copy the generated key
 
-**Why NCBI API key?**
+**Why NCBI API key is required?**
 - **Without it**: 3 requests/second, 10 requests/minute
 - **With it**: 10 requests/second, 50 requests/minute
 - **Result**: Faster PMC fetching, fewer rate limit errors
+- **Required for**: Reliable operation and better performance
 
 #### Create .env file
 Create a **.env** file in the project root:
@@ -129,7 +150,7 @@ GEMINI_API_KEY="your_gemini_api_key_here"
 # OR
 GROQ_API_KEY="your_groq_api_key_here"
 
-# Optional: NCBI API key for higher rate limits (recommended)
+# Required: NCBI API key for reliable operation
 NCBI_API_KEY="your_ncbi_api_key_here"
 
 # Optional: Rate limiting (adjust if you hit quotas)
@@ -143,7 +164,7 @@ CONTACT_EMAIL="your_email@example.com"
 
 > **Note**: You can export these as environment variables instead of using `.env` if you prefer.
 
-### 5) Run the app
+### Step 6: Run the app
 ```bash
 # Method 1: Using the root shim (recommended)
 streamlit run app.py
@@ -154,7 +175,7 @@ streamlit run app/app.py
 
 Open the URL that Streamlit prints (usually `http://localhost:8501`).
 
-### 6) Verify installation
+### Step 7: Verify installation
 The app should display:
 - ✅ PubMed Review Miner title
 - ✅ LLM Settings sidebar
@@ -163,21 +184,15 @@ The app should display:
 
 ---
 
-## Docker Setup (Alternative)
+## 🐳 Option 2: Docker Setup (Recommended)
 
-### Prerequisites for Docker
-- **Docker** 20.10+ and **Docker Compose** 2.0+
-- **Git** for cloning the repository
-
-### Quick Docker Setup
-
-#### 1) Clone and setup
+### Step 1: Clone the repository
 ```bash
 git clone https://github.com/Shubhs0411/Pubmed_Miner.git
 cd Pubmed_Miner
 ```
 
-#### 2) Configure environment
+### Step 2: Configure environment
 Create a `.env` file with your API keys:
 ```bash
 # Copy the example and edit
@@ -185,7 +200,11 @@ cp env.example .env
 # Edit .env with your API keys
 ```
 
-#### 3) Run with Docker Compose
+**Required API Keys:**
+- **GEMINI_API_KEY**: Get from [Google AI Studio](https://aistudio.google.com/)
+- **NCBI_API_KEY**: Get from [NCBI API Key Registration](https://www.ncbi.nlm.nih.gov/account/settings/)
+
+### Step 3: Run with Docker Compose
 ```bash
 # Build and start the application
 docker-compose up --build
@@ -194,11 +213,11 @@ docker-compose up --build
 docker-compose up -d --build
 ```
 
-#### 4) Access the application
-- Open your browser to: `http://localhost:8501`
+### Step 4: Access the application
+- Open your browser to: `http://localhost:8502`
 - The app will be running in a containerized environment
 
-#### 5) Stop the application
+### Step 5: Stop the application
 ```bash
 # Stop containers
 docker-compose down
@@ -214,7 +233,7 @@ docker-compose down -v
 docker build -t pubmed-miner .
 
 # Run the container
-docker run -p 8501:8501 --env-file .env pubmed-miner
+docker run -p 8502:8501 --env-file .env pubmed-miner
 
 # View logs
 docker-compose logs -f
@@ -334,10 +353,16 @@ This will search for Dengue-related protein review literature mentioning an acti
 - Add your API key to `.env` file or export as environment variable
 - Restart the app after adding the key
 
+**`NCBI_API_KEY not set`**
+- NCBI API key is required for reliable operation
+- Get your key from [NCBI API Key Registration](https://www.ncbi.nlm.nih.gov/account/settings/)
+- Add it to your `.env` file: `NCBI_API_KEY="your_key_here"`
+- Restart the app after adding the key
+
 **Rate limit/quota errors**
 - Lower `GEMINI_RPM` and/or `GEMINI_TPM` in `.env`
 - Increase `PAPER_PAUSE_SEC` for slower processing
-- **Get an NCBI API key** for higher rate limits (3→10 req/sec, 10→50 req/min)
+- **Ensure you have an NCBI API key** - it's required for reliable operation (3→10 req/sec, 10→50 req/min)
 
 **Some PMIDs show no PMC text**
 - The paper may be embargoed or not deposited in PMC
