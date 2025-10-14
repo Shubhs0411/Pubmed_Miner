@@ -43,8 +43,27 @@ pip install -r requirements.txt
 # pip install torch transformers huggingface-hub
 ```
 
-### 4) Configure environment variables
-Create a **.env** file in the project root with the following keys:
+### 4) Configure API keys
+
+#### Required: Get a Gemini API Key
+1. Go to [Google AI Studio](https://aistudio.google.com/)
+2. Sign in with your Google account
+3. Click "Get API key" → "Create API key"
+4. Copy the generated key
+
+#### Optional: Get an NCBI API Key (Recommended)
+1. Go to [NCBI API Key Registration](https://www.ncbi.nlm.nih.gov/account/settings/)
+2. Sign in to your NCBI account (create one if needed)
+3. Go to "API Key Management" → "Create API Key"
+4. Copy the generated key
+
+**Why NCBI API key?**
+- **Without it**: 3 requests/second, 10 requests/minute
+- **With it**: 10 requests/second, 50 requests/minute
+- **Result**: Faster PMC fetching, fewer rate limit errors
+
+#### Create .env file
+Create a **.env** file in the project root:
 
 ```dotenv
 # Required: Choose ONE LLM backend
@@ -52,7 +71,7 @@ GEMINI_API_KEY="your_gemini_api_key_here"
 # OR
 GROQ_API_KEY="your_groq_api_key_here"
 
-# Optional: NCBI API key for higher rate limits
+# Optional: NCBI API key for higher rate limits (recommended)
 NCBI_API_KEY="your_ncbi_api_key_here"
 
 # Optional: Rate limiting (adjust if you hit quotas)
@@ -146,7 +165,7 @@ This will search for Dengue-related protein review literature mentioning an acti
 **Rate limit/quota errors**
 - Lower `GEMINI_RPM` and/or `GEMINI_TPM` in `.env`
 - Increase `PAPER_PAUSE_SEC` for slower processing
-- Get an NCBI API key for higher rate limits
+- **Get an NCBI API key** for higher rate limits (3→10 req/sec, 10→50 req/min)
 
 **Some PMIDs show no PMC text**
 - The paper may be embargoed or not deposited in PMC
