@@ -5,7 +5,7 @@ from typing import Dict, List, Optional
 import time
 import pandas as pd
 
-from extractor import get_pmc_fulltext_with_meta  # your existing fetcher
+from extractor import get_pmc_fulltext_with_meta, get_last_fetch_source  # your existing fetcher
 #from llm_groq import run_on_paper, clean_and_ground  # your existing LLM + cleaner
 from llm_gemini import run_on_paper, clean_and_ground 
 import os
@@ -31,6 +31,7 @@ def fetch_all_fulltexts(pmids: List[str],
                 pmcid, text, title = get_pmc_fulltext_with_meta(pmid)
                 entry["pmcid"] = pmcid
                 entry["title"] = title
+                entry["source"] = get_last_fetch_source(pmid) 
                 if not pmcid or not text:
                     entry["status"] = "no_pmc_fulltext"
                 else:
@@ -61,11 +62,9 @@ def fetch_all_fulltexts(pmids: List[str],
     return out
 
 
+
 def analyze_texts(papers: dict,
         *,
-        virus_filter: str = "",
-        protein_filter: str = "",
-        exhaustive: bool = True,
         chunk_chars: int = 12000,
         overlap_chars: int = 500,
         delay_ms: int = 0,
@@ -105,9 +104,6 @@ def analyze_texts(papers: dict,
         meta = {
             "pmid": pmid,
             "pmcid": pmcid,
-            "virus_filter": (virus_filter or None),
-            "protein_filter": (protein_filter or None),
-            "exhaustive": exhaustive,
             "chunk_chars": chunk_chars,
             "overlap_chars": overlap_chars,
             "delay_ms": delay_ms,
@@ -124,6 +120,8 @@ def analyze_texts(papers: dict,
             require_mutation_in_quote=require_mut_quote,
             min_confidence=min_confidence,
         )
+       
+
         if "paper" in cleaned:
             cleaned["paper"]["title"] = title
 

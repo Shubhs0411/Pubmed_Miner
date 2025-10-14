@@ -4,6 +4,10 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+# near your other imports in app.py
+from extractor import get_last_fetch_source
+
+
 
 from services.pubmed import (
     esearch_reviews, esummary, parse_pubdate_interval, overlaps, to_pdat
@@ -41,20 +45,20 @@ st.caption("Search review articles, fetch PMC full text, run your LLM extractor,
 
 # ---------------- Sidebar: minimal knobs, advanced collapsed ----------------
 with st.sidebar:
-    st.header("Extraction Settings")
-    virus_filter = st.text_input("Virus filter (optional)", value="Dengue virus")
-    protein_filter = st.text_input("Protein filter (optional)", value="protein")
-    exhaustive = st.checkbox("Exhaustive mode", value=True)
+    st.header("LLM Settings")  # always visible, no expander
 
-    with st.expander("Advanced (chunking & thresholds)", expanded=False):
-        chunk_chars = st.slider("Max chars per chunk", 8000, 24000, 16000, 1000)
-        overlap_chars = st.slider("Overlap per chunk", 200, 1500, 500, 50)
-        delay_ms = st.slider("Delay between chunk calls (ms)", 0, 1500, 400, 50)
-        min_conf = st.slider("Min confidence", 0.0, 1.0, 0.6, 0.05)
-        require_mut_quote = st.checkbox("Require mutation token in quote", value=True)
+    # Open (always-on) controls
+    chunk_chars = st.slider("Max chars per chunk", 8000, 24000, 16000, 1000)
+    overlap_chars = st.slider("Overlap per chunk", 200, 1500, 500, 50)
+    delay_ms = st.slider("Delay between chunk calls (ms)", 0, 1500, 400, 50)
+    min_conf = st.slider("Min confidence", 0.0, 1.0, 0.6, 0.05)
+
+    # Permanently require the mutation token in the quote (no checkbox)
+    REQUIRE_MUT_QUOTE = True
 
     st.divider()
-    st.caption("Tip: set NCBI_API_KEY and GROQ_API_KEY in .env for reliability.")
+    st.caption("Tip: set NCBI_API_KEY and GROQ_API_KEY (or GEMINI_API_KEY) in .env for reliability.")
+
 
 # ---------------- Step 1: Query ----------------
 st.subheader("1) Enter your PubMed query (reviews only)")
@@ -76,7 +80,7 @@ with colA:
 with colB:
     sort = st.selectbox("Sort", ["relevance", "pub+date"], index=0)
 with colC:
-    cap = st.slider("Max records", 50, 5000, 1000, 50)
+    cap = st.slider("Max records", 0, 500, 100, 100)
 
 go = st.button("🔎 Search PubMed (reviews)")
 
@@ -256,6 +260,12 @@ if run_all:
                     st.markdown(f"**PMCID:** {pmcid}  |  [Open PMC](https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/)")
                 else:
                     st.markdown("**PMCID:** (not available)")
+
+                # PROVENANCE (JATS vs HTML)
+                source = (info.get("source") or get_last_fetch_source(pmid) or "unknown")
+                badge = {"jats": "🟢 JATS (XML)", "html": "🔵 HTML", "none": "⚪ none"}.get(source, "⚪ unknown")
+                st.markdown(f"**Source:** {badge}")
+
                 if text:
                     st.text_area("Full text (preview)", value=text, height=300, key=f"ta_{pmid}")
                     st.download_button(
@@ -319,10 +329,10 @@ if run_all:
         try:
             single_dict = analyze_texts(
                 {pmid: papers[pmid]},
-                virus_filter=virus_filter, protein_filter=protein_filter,
-                exhaustive=exhaustive, chunk_chars=chunk_chars, overlap_chars=overlap_chars,
-                delay_ms=delay_ms, min_confidence=min_conf, require_mut_quote=require_mut_quote,
+                chunk_chars=chunk_chars, overlap_chars=overlap_chars,
+                delay_ms=delay_ms, min_confidence=min_conf, require_mut_quote=True,
             )
+
             batch_results.update(single_dict); _persist("batch_results", batch_results)
 
             # live (partial) view uses the SAME table container
