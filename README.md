@@ -12,6 +12,41 @@ A Streamlit app to search **PubMed** for review articles, fetch **PMC** full tex
 - **Memory**: 4GB+ RAM recommended
 - **Internet**: Required for API calls and PMC fetching
 
+### Python Version Setup
+
+#### Check your Python version:
+```bash
+python --version
+# or
+python3 --version
+```
+
+#### If you need to install Python 3.11+:
+
+**Windows:**
+1. Download from [python.org](https://www.python.org/downloads/)
+2. Choose Python 3.11+ (latest stable)
+3. Check "Add Python to PATH" during installation
+
+**macOS:**
+```bash
+# Using Homebrew (recommended)
+brew install python@3.11
+
+# Or download from python.org
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt update
+sudo apt install python3.11 python3.11-venv python3.11-pip
+```
+
+**Linux (CentOS/RHEL):**
+```bash
+sudo yum install python3.11 python3.11-venv python3.11-pip
+```
+
 ### 1) Clone the repo
 ```bash
 git clone https://github.com/Shubhs0411/Pubmed_Miner.git
@@ -19,19 +54,42 @@ cd Pubmed_Miner
 ```
 
 ### 2) Create & activate a virtual environment
+
+#### Create virtual environment:
 ```bash
-# Create virtual environment
+# Using Python 3.11+ (replace with your Python version)
+python3.11 -m venv .venv
+# or
 python -m venv .venv
+```
 
-# Activate virtual environment
-# Windows (PowerShell)
+#### Activate virtual environment:
+
+**Windows (PowerShell):**
+```powershell
 .\.venv\Scripts\Activate.ps1
+```
 
-# Windows (Command Prompt)
+**Windows (Command Prompt):**
+```cmd
 .\.venv\Scripts\activate.bat
+```
 
-# macOS/Linux
+**macOS/Linux:**
+```bash
 source .venv/bin/activate
+```
+
+#### Verify activation:
+```bash
+# You should see (.venv) in your prompt
+which python
+# Should show: /path/to/Pubmed_Miner/.venv/bin/python
+```
+
+#### Deactivate when done:
+```bash
+deactivate
 ```
 
 ### 3) Install dependencies
@@ -109,21 +167,63 @@ The app should display:
 
 ```
 Pubmed_Miner/
-├─ app/
-│  └─ app.py              # Streamlit UI entrypoint
-├─ app.py                 # shim that runs app/app.py for convenience
-├─ services/
-│  ├─ pubmed.py           # PubMed search, summaries, date utils
-│  └─ pmc.py              # PMC fetching (JATS-first with HTML fallback)
-├─ pipeline/
-│  └─ batch_analyze.py    # Batch fulltext fetch + LLM analysis + tabular flattening
-├─ llm/
-│  ├─ __init__.py         # Facade exports for Gemini/Groq
-│  ├─ gemini.py           # Gemini two-pass extractor (tokens + attribution)
-│  └─ groq.py             # Thin wrapper over legacy llm_groq.py for compatibility
-├─ (extractor.py removed) # All callers should import from services.pmc
-├─ llm_gemini.py          # Legacy location (kept for compatibility; consider migrating imports)
-├─ llm_groq.py            # Legacy location (kept for compatibility; consider migrating imports)
+├── app/                          # Streamlit UI module
+│   ├── __init__.py              # Package initialization
+│   └── app.py                   # Main Streamlit application
+├── app.py                       # Root shim (redirects to app/app.py)
+├── llm/                         # LLM backends module
+│   ├── __init__.py              # Package initialization
+│   ├── gemini.py                # Google Gemini integration
+│   └── groq.py                  # Groq API integration
+├── pipeline/                    # Batch processing module
+│   ├── __init__.py              # Package initialization
+│   └── batch_analyze.py         # Batch fetch + LLM analysis
+├── services/                    # External API services
+│   ├── __init__.py              # Package initialization
+│   ├── pmc.py                   # PMC full-text fetching
+│   └── pubmed.py                # PubMed search & metadata
+├── venv/                        # Virtual environment (excluded from git)
+├── .env                         # Environment variables (excluded from git)
+├── .gitignore                   # Git ignore patterns
+├── README.md                    # This file
+└── requirements.txt             # Python dependencies
+```
+
+### Module Responsibilities
+
+**`app/`** - User Interface
+- `app.py`: Streamlit web interface with search, selection, and results display
+- Handles user interactions and data visualization
+
+**`llm/`** - Language Model Integration  
+- `gemini.py`: Google Gemini API integration for mutation extraction
+- `groq.py`: Groq API integration (alternative backend)
+- Both provide identical APIs: `run_on_paper()`, `clean_and_ground()`
+
+**`pipeline/`** - Batch Processing
+- `batch_analyze.py`: Orchestrates PMC fetching + LLM analysis
+- Functions: `fetch_all_fulltexts()`, `analyze_texts()`, `flatten_to_rows()`
+
+**`services/`** - External APIs
+- `pmc.py`: PMC full-text retrieval (JATS XML + HTML fallback)
+- `pubmed.py`: PubMed search, metadata, and date filtering
+- Functions: `esearch_reviews()`, `esummary()`, `get_pmc_fulltext_with_meta()`
+
+### Import Examples
+```python
+# UI imports
+from app.app import main
+
+# LLM backends
+from llm.gemini import run_on_paper, clean_and_ground
+from llm.groq import run_on_paper, clean_and_ground
+
+# Services
+from services.pmc import get_pmc_fulltext_with_meta, get_last_fetch_source
+from services.pubmed import esearch_reviews, esummary
+
+# Pipeline
+from pipeline.batch_analyze import fetch_all_fulltexts, analyze_texts
 ```
 
 Notes:
@@ -173,8 +273,9 @@ This will search for Dengue-related protein review literature mentioning an acti
 
 **Import errors or missing modules**
 - Ensure you're using Python 3.11+
+- Check virtual environment is activated: `which python` should show `.venv/bin/python`
 - Reinstall dependencies: `pip install -r requirements.txt`
-- Check virtual environment is activated
+- Try: `pip install --upgrade pip` then `pip install -r requirements.txt`
 
 **Blank page or app won't start**
 - Try: `streamlit run app/app.py` directly
