@@ -5,9 +5,9 @@ from typing import Dict, List, Optional
 import time
 import pandas as pd
 
-from extractor import get_pmc_fulltext_with_meta, get_last_fetch_source  # your existing fetcher
-#from llm_groq import run_on_paper, clean_and_ground  # your existing LLM + cleaner
-from llm_gemini import run_on_paper, clean_and_ground 
+from services.pmc import get_pmc_fulltext_with_meta, get_last_fetch_source  # modular PMC services
+# from llm.groq import run_on_paper, clean_and_ground  # optional: switch to Groq backend
+from llm.gemini import run_on_paper, clean_and_ground  # default: Gemini backend
 import os
 import time
 

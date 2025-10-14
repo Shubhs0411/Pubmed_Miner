@@ -1,6 +1,4 @@
-# llm_gemini.py
-# Two-pass, LLM-only mutation/protein miner using Google Gemini (drop-in replacement for llm_groq.py)
-# Public API kept identical: run_on_paper(paper_text, meta) and clean_and_ground(raw, full_text, ...)
+# Moved from llm_gemini.py — public API preserved
 from __future__ import annotations
 
 import os
@@ -12,20 +10,17 @@ from time import monotonic as _mono
 from typing import List, Dict, Any, Optional
 from typing import Tuple
 
-# Load .env if present
 try:
     from dotenv import load_dotenv  # type: ignore
     load_dotenv()
 except Exception:
     pass
 
-# ===== Gemini config =====
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
-# Soft rate limits (defaults sized for free tier; tune via .env)
-GEMINI_RPM = int(os.getenv("GEMINI_RPM", "12"))       # requests/minute (free tier ~15)
-GEMINI_TPM = int(os.getenv("GEMINI_TPM", "200000"))   # tokens/minute (free tier ~250k)
+GEMINI_RPM = int(os.getenv("GEMINI_RPM", "12"))
+GEMINI_TPM = int(os.getenv("GEMINI_TPM", "200000"))
 
 if not GEMINI_API_KEY:
     raise RuntimeError("GEMINI_API_KEY not set. Put it in your environment or .env")
@@ -38,14 +33,12 @@ except Exception as e:
 genai.configure(api_key=GEMINI_API_KEY)
 _model = genai.GenerativeModel(DEFAULT_MODEL)
 
-# ===== Soft RPM/TPM gates =====
 _RATE_LOCK = threading.Lock()
 _MIN_INTERVAL = 60.0 / GEMINI_RPM if GEMINI_RPM > 0 else 0.0
 _WINDOW_START = _mono()
 _TOKENS_USED = 0
 
 def _approx_tokens(s: str) -> int:
-    # crude: ~4 chars per token
     return int(len(s) / 4) if s else 0
 
 def _rpm_gate():
@@ -78,7 +71,6 @@ def _tpm_gate(estimated_tokens: int):
         _TOKENS_USED = 0
     _TOKENS_USED += max(0, estimated_tokens)
 
-# ===== Utilities (identical shapes to llm_groq.py) =====
 _ALLOWED_CATEGORIES = {
     "RNA_synthesis", "virion_assembly", "binding", "replication",
     "infectivity", "virulence", "immune_evasion", "drug_interaction",
@@ -146,7 +138,6 @@ def _safe_json_loads(raw: str) -> Optional[dict]:
                 return None
     return None
 
-# ===== Prompts (generalized to mutations + proteins + amino_acids) =====
 def _pass1_prompt(paper_text: str) -> str:
     sys = (
          "You extract mutation, protein, and amino-acid tokens from biomedical papers.\n"
@@ -167,7 +158,6 @@ def _pass1_prompt(paper_text: str) -> str:
     )
     return sys + "\n\n" + usr
 
-
 def _pass2_prompt(local_context: str,
                   token: str,
                   pmid: Optional[str],
@@ -187,13 +177,12 @@ def _pass2_prompt(local_context: str,
         mutation_field = json.dumps(token)
         protein_hint = "<protein or gene symbol>"
     else:
-        # protein / amino_acid
         quote_rule = (
             "At least one quote MUST contain the exact target token. "
             "If you cannot support the target with a grounded quote in the LOCAL_CONTEXT, return an empty sequence_features list."
         )
-        mutation_field = "null"           # allow protein-level findings with no explicit mutation
-        protein_hint = token              # bias attribution to this protein
+        mutation_field = "null"
+        protein_hint = token
 
     usr = (
         "Given the LOCAL_CONTEXT (excerpts from the paper) and the target, extract one structured item.\n"
@@ -226,10 +215,7 @@ def _pass2_prompt(local_context: str,
     )
     return sys + "\n\n" + usr
 
-
-# ===== Gemini wrapper (with 429-aware retries + RPM/TPM gates) =====
 def _parse_retry_delay_seconds(err_text: str) -> int:
-    # Try to find explicit “retry in 44.53s” or retry_delay { seconds: 44 }
     m = re.search(r"retry(?:\s+in)?\s*([0-9]+(?:\.[0-9]+)?)\s*s", err_text, re.I)
     if m:
         try:
@@ -242,16 +228,12 @@ def _parse_retry_delay_seconds(err_text: str) -> int:
             return max(1, int(m2.group(1)))
         except Exception:
             pass
-    # Fallback for per-minute limits
     return 60
 
-
 def _gemini_complete(prompt_text: str, max_output_tokens: int) -> str:
-    # Soft gates to avoid hitting 429 in the first place
     est = _approx_tokens(prompt_text) + int(max_output_tokens or 0)
     _rpm_gate()
     _tpm_gate(est)
-
     max_attempts = 5
     backoff = 5
     for attempt in range(1, max_attempts + 1):
@@ -259,7 +241,7 @@ def _gemini_complete(prompt_text: str, max_output_tokens: int) -> str:
             resp = _model.generate_content(
                 contents=prompt_text,
                 generation_config=genai.types.GenerationConfig(
-                    temperature=0.0,          # clamp sampling
+                    temperature=0.0,
                     top_p=1.0,
                     top_k=1,
                     candidate_count=1,
@@ -267,27 +249,21 @@ def _gemini_complete(prompt_text: str, max_output_tokens: int) -> str:
                     response_mime_type="text/plain",
                 )
             )
-
             return (resp.text or "").strip()
         except Exception as e:
             msg = str(e) or ""
-            # Handle free-tier 429 with server-suggested delay
             if "429" in msg or "rate limit" in msg.lower() or "quota" in msg.lower():
                 delay = _parse_retry_delay_seconds(msg)
                 print(f"[gemini] 429/quota on attempt {attempt}/{max_attempts}. Sleeping {delay}s…", flush=True)
                 time.sleep(delay)
                 continue
-            # transient 5xx -> progressive backoff
             if any(x in msg for x in ("502", "503", "504")):
                 print(f"[gemini] transient error {msg}. Backoff {backoff}s…", flush=True)
                 time.sleep(backoff); backoff = min(backoff * 2, 60)
                 continue
-            # non-retryable
             raise
-    # final failure
     raise RuntimeError("Gemini call failed after retries.")
 
-# ===== Public: two-pass LLM pipeline (same signature as llm_groq.run_on_paper) =====
 def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     meta = meta or {}
     pmid = meta.get("pmid")
@@ -298,10 +274,7 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
 
     paper_text = _normalize_ws(paper_text)
 
-    # ---------- Pass 1: enumerate tokens over chunks ----------
-    # We collect three categories: mutations, proteins, amino_acids.
-    # 'seen' dedupes across all categories by literal token string.
-    tokens: List[Tuple[str, str]] = []  # (token_type, token)
+    tokens: List[Tuple[str, str]] = []
     seen: set[str] = set()
 
     for chunk in _chunk_text(paper_text, max_chars=chunk_chars, overlap=overlap_chars):
@@ -309,43 +282,31 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         try:
             raw1 = _gemini_complete(prompt, max_output_tokens=700)
         except Exception:
-            # Skip this chunk if model hiccups
             continue
-
         j1 = _safe_json_loads(raw1) or {"mutations": [], "proteins": [], "amino_acids": []}
-
-        # Mutations
         for m in (j1.get("mutations") or []):
             if isinstance(m, str):
                 t = m.strip()
                 if t and t not in seen:
                     seen.add(t)
                     tokens.append(("mutation", t))
-
-        # Proteins
         for p in (j1.get("proteins") or []):
             if isinstance(p, str):
                 t = p.strip()
                 if t and t not in seen:
                     seen.add(t)
                     tokens.append(("protein", t))
-
-        # Amino acids
         for aa in (j1.get("amino_acids") or []):
             if isinstance(aa, str):
                 t = aa.strip()
                 if t and t not in seen:
                     seen.add(t)
                     tokens.append(("amino_acid", t))
-
         if delay_ms:
             time.sleep(delay_ms / 1000.0)
 
-    # ---------- Pass 2: attribution per token (token-agnostic) ----------
     seq_feats: List[Dict[str, Any]] = []
-
     for tok_type, tok in tokens:
-        # Reuse the same local-windowing helper (name mentions 'mutation' but it’s string-based).
         local_ctx = _windows_for_mutation(
             paper_text, tok,
             left=900, right=900, max_windows=6, max_total_chars=min(12000, chunk_chars)
@@ -354,22 +315,18 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         try:
             raw2 = _gemini_complete(prompt2, max_output_tokens=1200)
         except Exception:
-            # Try smaller window on failure
             local_ctx = _windows_for_mutation(
                 paper_text, tok, left=600, right=600, max_windows=4, max_total_chars=7000
             )
             prompt2 = _pass2_prompt(local_ctx, tok, pmid, pmcid, tok_type)
             raw2 = _gemini_complete(prompt2, max_output_tokens=900)
-
         j2 = _safe_json_loads(raw2) or {}
         feats = (j2.get("sequence_features") or []) if isinstance(j2, dict) else []
         for f in feats:
             if isinstance(f, dict):
-                # Ensure target fields exist for downstream filters
                 f.setdefault("target_token", tok)
                 f.setdefault("target_type", tok_type)
                 seq_feats.append(f)
-
         if delay_ms:
             time.sleep(delay_ms / 1000.0)
 
@@ -378,8 +335,6 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         "sequence_features": seq_feats
     }
 
-
-# ===== Cleaner (same math as llm_groq.clean_and_ground, generalized token rule) =====
 def clean_and_ground(raw: Dict[str, Any],
                      full_text: str,
                      *,
@@ -387,52 +342,35 @@ def clean_and_ground(raw: Dict[str, Any],
                      require_mutation_in_quote: bool = True,
                      require_target_in_quote: Optional[bool] = None,
                      min_confidence: float = 0.0) -> Dict[str, Any]:
-    """
-    Back-compat:
-      - 'require_mutation_in_quote' retained.
-      - New 'require_target_in_quote' (generic) defaults to the legacy flag if not provided.
-    """
     if require_target_in_quote is None:
         require_target_in_quote = require_mutation_in_quote
-
     paper = (raw or {}).get("paper") or {
         "pmid": None, "pmcid": None, "title": None, "virus_candidates": [], "protein_candidates": []
     }
     feats = (raw or {}).get("sequence_features") or []
     kept = []
-
     norm_text = _normalize_ws(full_text).lower() if isinstance(full_text, str) else ""
     for f in feats:
         if not isinstance(f, dict):
             continue
-
-        # Prefer the explicit target_token; otherwise fall back to mutation
         token = (f.get("target_token") or f.get("mutation") or "").strip()
         if not token:
             continue
-
-        # Quote grounding: at least one short quote appears verbatim in the paper
         quotes = [q for q in (f.get("evidence_quotes") or []) if isinstance(q, str) and q.strip()]
         quote_ok = False
         if quotes and isinstance(full_text, str):
             for q in quotes:
                 ql = _normalize_ws(q).lower()
-                # If require_target_in_quote is set, the exact token must be present in the grounded quote
                 if ql in norm_text and (not require_target_in_quote or (token.lower() in ql)):
                     quote_ok = True
                     break
         if not quote_ok:
             continue
-
-        # Normalize effect category
         cat = (f.get("effect_category") or "").strip()
         if cat and cat not in _ALLOWED_CATEGORIES:
             f["effect_category"] = "other"
-
-        # Simple confidence heuristic
         conf = 0.0
         if quotes: conf += 0.6
-        # position may be str or int; count it if it’s an integer-like
         pos = f.get("position")
         try:
             if isinstance(pos, int) or (isinstance(pos, str) and pos.strip().isdigit()):
@@ -442,29 +380,21 @@ def clean_and_ground(raw: Dict[str, Any],
         ctx = f.get("experiment_context") or {}
         if any(ctx.get(k) for k in ("system", "assay", "temperature")): conf += 0.1
         if f.get("effect_category"): conf += 0.1
-
-        # Slight boost for grounded protein-level items with no explicit mutation
         if f.get("mutation") in (None, "",) and f.get("target_type") == "protein":
             conf = min(1.0, conf + 0.1)
-
         f["confidence"] = min(conf, 1.0)
-
         if f["confidence"] < float(min_confidence or 0.0):
             continue
-
-        # Back-compat: if this is a non-mutation token, keep fields consistent
-        # so old consumers that expect "mutation" don’t break.
         if not f.get("mutation") and f.get("target_token"):
             if f.get("target_type") == "mutation":
                 f["mutation"] = f["target_token"]
-
         kept.append(f)
-
     return {"paper": paper, "sequence_features": kept}
-
 
 __all__ = [
     "run_on_paper",
     "clean_and_ground",
     "DEFAULT_MODEL",
 ]
+
+

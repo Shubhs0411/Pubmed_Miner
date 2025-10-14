@@ -1,4 +1,3 @@
-# extractor.py
 from __future__ import annotations
 
 import os
@@ -15,18 +14,14 @@ from bs4 import BeautifulSoup
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 PMC_ARTICLE_URL = "https://pmc.ncbi.nlm.nih.gov/articles"
 
-# Identify yourself to NCBI (recommended)
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "you@example.com")
 HEADERS_HTML = {"User-Agent": f"SVF-PMC-Fetch/1.2 (+mailto:{CONTACT_EMAIL})"}
 
-# --- provenance (so UI can show "JATS" vs "HTML" without breaking return types) ---
-_LAST_SOURCE: Dict[str, str] = {}  # keys: pmid or pmcid -> {"jats"|"html"|"none"}
+_LAST_SOURCE: Dict[str, str] = {}
 
 def get_last_fetch_source(key: str) -> Optional[str]:
-    """Return 'jats'|'html'|'none' for last fetch of this pmid/pmcid (best-effort)."""
     return _LAST_SOURCE.get(str(key))
 
-# ---------- Session with retries ----------
 def _make_session() -> requests.Session:
     s = requests.Session()
     retries = Retry(
@@ -65,7 +60,6 @@ def _get_json(url: str, params: dict, tries: int = 3, sleep_s: float = 0.6) -> d
             last_exc = e; time.sleep(sleep_s * (i + 1))
     raise last_exc or RuntimeError("EUtils request failed")
 
-# ---------- PMID <-> PMCID mapping ----------
 def pmid_to_pmcid(pmid: str) -> Optional[str]:
     j = _get_json(f"{EUTILS}/elink.fcgi", {
         "dbfrom": "pubmed", "db": "pmc", "id": pmid, "retmode": "json",
@@ -99,7 +93,6 @@ def pmcid_to_pmid(pmcid: str) -> Optional[str]:
         pass
     return None
 
-# ---------- PubMed HTML helpers (embargo & publisher links) ----------
 _EMBARGO_RE = re.compile(r"PMCID:\s*PMC\d+\s*\(available on\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\)", re.I)
 
 def _pubmed_embargo_date_for_pmid(pmid: str) -> Optional[str]:
@@ -140,17 +133,12 @@ def get_publisher_links(pmid: str) -> Dict[str, Any]:
             pass
     return out
 
-# ---------- JATS via EUTILS efetch (reliable) ----------
 def fetch_pmc_jats_xml(pmcid: str, *, tries: int = 3, sleep_s: float = 0.8) -> str:
-    """
-    Retrieve JATS XML via E-utilities efetch (db=pmc). Raises on failure.
-    """
     pmc_num = re.sub(r"^PMC", "", str(pmcid), flags=re.I)
     url = f"{EUTILS}/efetch.fcgi"
     params = {"db": "pmc", "id": pmc_num, "retmode": "xml"}
     api_key = os.getenv("NCBI_API_KEY")
     if api_key: params["api_key"] = api_key
-
     last_exc = None
     for i in range(tries):
         try:
@@ -170,12 +158,10 @@ def _jats_to_text_and_title(xml_str: str) -> Tuple[str, Optional[str]]:
         soup = BeautifulSoup(xml_str, "lxml-xml")
     except Exception:
         soup = BeautifulSoup(xml_str, "xml")
-
     title_el = (soup.find("article-title")
                 or (soup.find("title-group").find("article-title") if soup.find("title-group") else None)
                 or soup.find("title"))
     title = title_el.get_text(" ", strip=True) if title_el else None
-
     parts: List[str] = []
     for ab in soup.find_all("abstract"):
         t = ab.get_text(" ", strip=True)
@@ -191,11 +177,9 @@ def _jats_to_text_and_title(xml_str: str) -> Tuple[str, Optional[str]]:
         for li in body.find_all("li"):
             t = li.get_text(" ", strip=True)
             if t: parts.append(t)
-
     text = " ".join(" ".join(parts).split())
     return text, title
 
-# ---------- PMC HTML ----------
 def _html_to_text_and_title(html: str) -> Tuple[str, Optional[str]]:
     soup = BeautifulSoup(html, "html.parser")
     t_el = soup.find(["h1", "title"])
@@ -222,24 +206,14 @@ def fetch_pmc_html_text_and_title(pmcid: str, retries: int = 3) -> Tuple[str, Op
         r.raise_for_status()
     raise RuntimeError(f"pmc_fetch_failed status={last_status}")
 
-# ---------- Public: JATS-first with graceful fallback + provenance ----------
 def get_pmc_fulltext_with_meta(pmid: str) -> Tuple[Optional[str], str, Optional[str]]:
-    """
-    Returns (pmcid, text, title). JATS (efetch) first, then HTML fallback.
-    IMPORTANT: We no longer hard-fail on pmcid->pmid reverse mismatches; we warn but continue.
-    """
     pmcid = pmid_to_pmcid(pmid)
     if not pmcid:
         _LAST_SOURCE[pmid] = "none"
         return None, "", None
-
-    # Relaxed reverse validation: warn but do not drop (some PMC records map oddly)
     back = pmcid_to_pmid(pmcid)
     if back and str(back) != str(pmid):
-        # Just proceed; this is how your compare script still succeeded.
         pass
-
-    # Try JATS first
     try:
         jats_xml = fetch_pmc_jats_xml(pmcid)
         if jats_xml:
@@ -249,8 +223,6 @@ def get_pmc_fulltext_with_meta(pmid: str) -> Tuple[Optional[str], str, Optional[
                 return pmcid, j_text, j_title
     except Exception:
         pass
-
-    # Fallback: HTML
     try:
         text, title = fetch_pmc_html_text_and_title(pmcid)
         _LAST_SOURCE[pmid]  = _LAST_SOURCE[pmcid] = "html"
@@ -270,3 +242,12 @@ def get_free_publisher_fallback(pmid: str) -> Dict[str, Any]:
     info = get_publisher_links(pmid)
     info["embargo_until"] = _pubmed_embargo_date_for_pmid(pmid)
     return info
+
+__all__ = [
+    "get_pmc_fulltext_with_meta",
+    "get_pmc_fulltext",
+    "get_free_publisher_fallback",
+    "get_last_fetch_source",
+]
+
+

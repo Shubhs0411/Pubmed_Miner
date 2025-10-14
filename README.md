@@ -53,6 +53,31 @@ Open the URL that Streamlit prints (usually `http://localhost:8501`).
 
 ---
 
+## Project Structure
+
+```
+Pubmed_Miner/
+├─ app.py                 # Streamlit UI
+├─ services/
+│  ├─ pubmed.py           # PubMed search, summaries, date utils
+│  └─ pmc.py              # PMC fetching (JATS-first with HTML fallback)
+├─ pipeline/
+│  └─ batch_analyze.py    # Batch fulltext fetch + LLM analysis + tabular flattening
+├─ llm/
+│  ├─ __init__.py         # Facade exports for Gemini/Groq
+│  ├─ gemini.py           # Gemini two-pass extractor (tokens + attribution)
+│  └─ groq.py             # Thin wrapper over legacy llm_groq.py for compatibility
+├─ (extractor.py removed) # All callers should import from services.pmc
+├─ llm_gemini.py          # Legacy location (kept for compatibility; consider migrating imports)
+├─ llm_groq.py            # Legacy location (kept for compatibility; consider migrating imports)
+```
+
+Notes:
+- Backwards compatibility is preserved. Existing imports like `from extractor import get_pmc_fulltext_with_meta` still work.
+- New code should import from `llm.gemini` or `llm.groq` and `services.pmc` directly.
+
+---
+
 ## Sample PubMed Query
 
 When the app starts, you can try a query like:
