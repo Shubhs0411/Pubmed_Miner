@@ -163,6 +163,78 @@ The app should display:
 
 ---
 
+## Docker Setup (Alternative)
+
+### Prerequisites for Docker
+- **Docker** 20.10+ and **Docker Compose** 2.0+
+- **Git** for cloning the repository
+
+### Quick Docker Setup
+
+#### 1) Clone and setup
+```bash
+git clone https://github.com/Shubhs0411/Pubmed_Miner.git
+cd Pubmed_Miner
+```
+
+#### 2) Configure environment
+Create a `.env` file with your API keys:
+```bash
+# Copy the example and edit
+cp env.example .env
+# Edit .env with your API keys
+```
+
+#### 3) Run with Docker Compose
+```bash
+# Build and start the application
+docker-compose up --build
+
+# Or run in background
+docker-compose up -d --build
+```
+
+#### 4) Access the application
+- Open your browser to: `http://localhost:8501`
+- The app will be running in a containerized environment
+
+#### 5) Stop the application
+```bash
+# Stop containers
+docker-compose down
+
+# Stop and remove volumes
+docker-compose down -v
+```
+
+### Docker Commands Reference
+
+```bash
+# Build the image
+docker build -t pubmed-miner .
+
+# Run the container
+docker run -p 8501:8501 --env-file .env pubmed-miner
+
+# View logs
+docker-compose logs -f
+
+# Rebuild after changes
+docker-compose up --build --force-recreate
+
+# Clean up
+docker-compose down -v --rmi all
+```
+
+### Docker Benefits
+- ✅ **Consistent environment** across all systems
+- ✅ **No Python version conflicts**
+- ✅ **Easy deployment** and scaling
+- ✅ **Isolated dependencies**
+- ✅ **Production-ready** setup
+
+---
+
 ## Project Structure
 
 ```
