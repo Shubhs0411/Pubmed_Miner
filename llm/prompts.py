@@ -7,6 +7,7 @@ class AnalystPrompts:
 "You are a biomedical text-mining expert tasked with extracting Sequence Features (SFs) from viral or microbial protein literature.\n"
     "A Sequence Feature (SF) refers to any amino acid region, residue, motif, or mutation that plays a key role in protein structure, function, or phenotype.\n"
     "Extract as many features as you can find, including active sites, binding sites, mutations, regions, and other significant sequence-related elements.\n"
+    "Include comparative findings from closely related strains or surrogate alphaviruses whenever the paper uses them to explain or predict the protein’s behavior—note the organism if it differs.\n"
     "If there are multiple features mentioned in the text, capture all of them. Provide every unique feature in the form of a JSON array.\n"
 These may include:
 • Active sites, binding sites, or motifs (e.g., “His57-Asp81-Ser139 catalytic triad”)
@@ -50,7 +51,7 @@ Output Schema
  
 Guidelines for the Model
 1.	Identify sequence-linked facts:
-Focus on any statement that ties a residue number, amino acid identity, or range of residues to a biological or biochemical property.
+Focus on any statement that ties a residue number, amino acid identity, or range of residues to a biological or biochemical property, including evidence sourced from related alphaviruses when explicitly used for comparison.
 2.	Normalize numbering as reported:
 Do not renumber to canonical coordinates unless explicitly mapped.
 (Use "numbering_system": "as reported" if unspecified.)
@@ -58,6 +59,7 @@ Do not renumber to canonical coordinates unless explicitly mapped.
 When multiple residues are part of one functional feature (e.g., catalytic triad), list each in "specific_residues" and set "continuity": "discontinuous".
 4.	Mutations:
 When amino acid substitutions are mentioned (e.g., E1:A226V), create separate entries for each variant, include HGVS-style "p.Glu484Lys" notation, and specify their effect direction.
+Capture mutations regardless of wording—convert spelled-out forms such as "alanine 226 to valine" or "Ala 226 → Val" into both HGVS (`p.Ala226Val`) and concise tokens (`A226V`).
 5.	Quotes & evidence:
 Each JSON object must include a short snippet (≤30 words) capturing the evidence from the text — typically the sentence or clause containing residue indices or function.
 6.	Confidence scoring:

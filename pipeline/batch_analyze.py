@@ -1,15 +1,26 @@
 # pipeline/batch_analyze.py
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import os
 import time
+from typing import Dict, List, Optional
+
 import pandas as pd
 
 from services.pmc import get_pmc_fulltext_with_meta, get_last_fetch_source  # modular PMC services
 # from llm.groq import run_on_paper, clean_and_ground  # optional: switch to Groq backend
 from llm.gemini import run_on_paper, clean_and_ground  # default: Gemini backend
-import os
-import time
+
+
+def _is_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+SAVE_RAW_LLM = _is_truthy(os.getenv("SAVE_RAW_LLM"))
 
 
 def fetch_all_fulltexts(pmids: List[str],
@@ -111,6 +122,9 @@ def analyze_texts(papers: dict,
         if llm_meta:
             meta.update(llm_meta)
 
+        debug_override = meta.pop("debug_raw", None) if "debug_raw" in meta else None
+        capture_raw = SAVE_RAW_LLM or _is_truthy(debug_override)
+
         raw = run_on_paper(text, meta=meta)
 
         cleaned = clean_and_ground(
@@ -131,6 +145,8 @@ def analyze_texts(papers: dict,
             "title": title,
             "result": cleaned,
         }
+        if capture_raw:
+            results[pmid]["raw_llm"] = raw
 
         # ---- NEW: gentle pacing between papers to avoid 429s ----
         if paper_pause_sec and paper_pause_sec > 0:

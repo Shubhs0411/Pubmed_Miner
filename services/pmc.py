@@ -17,6 +17,8 @@ PMC_ARTICLE_URL = "https://pmc.ncbi.nlm.nih.gov/articles"
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "you@example.com")
 HEADERS_HTML = {"User-Agent": f"SVF-PMC-Fetch/1.2 (+mailto:{CONTACT_EMAIL})"}
 
+MIN_JATS_BODY_CHARS = int(os.getenv("PMC_MIN_JATS_CHARS", "1200"))
+
 _LAST_SOURCE: Dict[str, str] = {}
 
 def get_last_fetch_source(key: str) -> Optional[str]:
@@ -214,18 +216,41 @@ def get_pmc_fulltext_with_meta(pmid: str) -> Tuple[Optional[str], str, Optional[
     back = pmcid_to_pmid(pmcid)
     if back and str(back) != str(pmid):
         pass
+    jats_text: Optional[Tuple[str, Optional[str]]] = None
     try:
         jats_xml = fetch_pmc_jats_xml(pmcid)
         if jats_xml:
-            j_text, j_title = _jats_to_text_and_title(jats_xml)
-            if j_text and len(j_text) > 200:
-                _LAST_SOURCE[pmid] = _LAST_SOURCE[pmcid] = "jats"
-                return pmcid, j_text, j_title
+            tmp_text, tmp_title = _jats_to_text_and_title(jats_xml)
+            if tmp_text and len(tmp_text) > 200:
+                jats_text = (tmp_text, tmp_title)
     except Exception:
-        pass
+        jats_text = None
+
+    if jats_text:
+        j_text, j_title = jats_text
+        html_text = None
+        html_title = None
+        try_html = (len(j_text) < max(200, MIN_JATS_BODY_CHARS))
+        if not try_html:
+            # Still consider HTML if it can provide substantially more content.
+            try_html = True
+        if try_html:
+            try:
+                html_text, html_title = fetch_pmc_html_text_and_title(pmcid)
+            except RuntimeError:
+                html_text = None
+                html_title = None
+
+        if html_text and len(html_text) > len(j_text) + 400:
+            _LAST_SOURCE[pmid] = _LAST_SOURCE[pmcid] = "html"
+            return pmcid, html_text, html_title
+
+        _LAST_SOURCE[pmid] = _LAST_SOURCE[pmcid] = "jats"
+        return pmcid, j_text, j_title
+
     try:
         text, title = fetch_pmc_html_text_and_title(pmcid)
-        _LAST_SOURCE[pmid]  = _LAST_SOURCE[pmcid] = "html"
+        _LAST_SOURCE[pmid] = _LAST_SOURCE[pmcid] = "html"
         return pmcid, text, title
     except RuntimeError as e:
         if "pmc_embargo_or_blocked" in str(e):
@@ -249,5 +274,3 @@ __all__ = [
     "get_free_publisher_fallback",
     "get_last_fetch_source",
 ]
-
-

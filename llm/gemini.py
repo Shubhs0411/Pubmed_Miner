@@ -121,11 +121,91 @@ _ALLOWED_CATEGORIES = {
     "infectivity", "virulence", "immune_evasion", "drug_interaction",
     "temperature_sensitivity", "activity_change", "modification", "other"
 }
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(])")
+
+_AA_NAME_TO_CODES = {
+    "ala": ("A", "Ala"), "alanine": ("A", "Ala"),
+    "arg": ("R", "Arg"), "arginine": ("R", "Arg"),
+    "asn": ("N", "Asn"), "asparagine": ("N", "Asn"),
+    "asp": ("D", "Asp"), "aspartate": ("D", "Asp"), "aspartic acid": ("D", "Asp"),
+    "cys": ("C", "Cys"), "cysteine": ("C", "Cys"),
+    "gln": ("Q", "Gln"), "glutamine": ("Q", "Gln"),
+    "glu": ("E", "Glu"), "glutamate": ("E", "Glu"), "glutamic acid": ("E", "Glu"),
+    "gly": ("G", "Gly"), "glycine": ("G", "Gly"),
+    "his": ("H", "His"), "histidine": ("H", "His"),
+    "ile": ("I", "Ile"), "isoleucine": ("I", "Ile"),
+    "leu": ("L", "Leu"), "leucine": ("L", "Leu"),
+    "lys": ("K", "Lys"), "lysine": ("K", "Lys"),
+    "met": ("M", "Met"), "methionine": ("M", "Met"),
+    "phe": ("F", "Phe"), "phenylalanine": ("F", "Phe"),
+    "pro": ("P", "Pro"), "proline": ("P", "Pro"),
+    "ser": ("S", "Ser"), "serine": ("S", "Ser"),
+    "thr": ("T", "Thr"), "threonine": ("T", "Thr"),
+    "trp": ("W", "Trp"), "tryptophan": ("W", "Trp"),
+    "tyr": ("Y", "Tyr"), "tyrosine": ("Y", "Tyr"),
+    "val": ("V", "Val"), "valine": ("V", "Val"),
+    "sec": ("U", "Sec"), "selenocysteine": ("U", "Sec"),
+    "pyl": ("O", "Pyl"), "pyrrolysine": ("O", "Pyl"),
+    "stop": ("*", "Ter"), "ochre": ("*", "Ter"), "amber": ("*", "Ter"), "opal": ("*", "Ter"),
+}
+_AA_NAME_PATTERN = "|".join(
+    sorted((re.escape(k) for k in _AA_NAME_TO_CODES.keys()), key=len, reverse=True)
+)
+_SPELLED_MUT_RE = re.compile(
+    rf"(?P<from>{_AA_NAME_PATTERN})\s*(?:residue\s*)?(?P<pos>\d{{1,5}})"
+    r"(?:\s*(?:to|into|->|→|for|with|by|in|changed\s+to|replaced\s+by|replaced\s+with|substituted\s+with|substituted\s+by))"
+    r"\s*(?:a\s+|an\s+)?(?P<to>{_AA_NAME_PATTERN})(?:\s+residue|\s+residues)?",
+    re.IGNORECASE,
+)
 
 def _normalize_ws(text: str) -> str:
     if not isinstance(text, str):
         return ""
     return " ".join(text.split())
+
+def _expand_to_sentence(full_text: str, fragment: str) -> Optional[str]:
+    """
+    Locate the sentence in full_text that contains the fragment.
+    Returns None if the fragment cannot be matched.
+    """
+    if not isinstance(full_text, str) or not isinstance(fragment, str):
+        return None
+    frag_norm = _normalize_ws(fragment).lower()
+    if not frag_norm:
+        return None
+
+    # Flatten whitespace for sentence scanning, keep original punctuation.
+    corpus = full_text.replace("\n", " ").replace("\r", " ")
+    sentences = _SENTENCE_SPLIT_RE.split(corpus)
+    for sentence in sentences:
+        sent_norm = _normalize_ws(sentence).lower()
+        if frag_norm in sent_norm:
+            return sentence.strip()
+    return None
+
+
+def _lookup_aa_codes(name: str) -> Optional[Tuple[str, str]]:
+    return _AA_NAME_TO_CODES.get(name.lower())
+
+
+def _extract_spelled_mutation(text: str) -> Optional[Tuple[str, str]]:
+    if not isinstance(text, str):
+        return None
+    normalized = text.replace("–", "-").replace("—", "-").replace("→", "->")
+    for match in _SPELLED_MUT_RE.finditer(normalized):
+        pos = match.group("pos")
+        aa_from = _lookup_aa_codes(match.group("from"))
+        aa_to = _lookup_aa_codes(match.group("to"))
+        if not aa_from or not aa_to:
+            continue
+        one_from, three_from = aa_from
+        one_to, three_to = aa_to
+        if not pos or not one_from or not one_to:
+            continue
+        short = f"{one_from}{pos}{one_to}"
+        hgvs = f"p.{three_from}{pos}{three_to}"
+        return hgvs, short
+    return None
 
 def _chunk_text(text: str, max_chars: int = 12000, overlap: int = 500) -> List[str]:
     t = _normalize_ws(text)
@@ -295,15 +375,27 @@ def _convert_bio_schema_feature(f: Dict[str, Any]) -> Dict[str, Any]:
     mutation = None
     target_type = None
     target_token = None
-    if variants and isinstance(variants, list):
-        mutation = variants[0]
-        target_token = variants[0]
+
+    def _apply_mutation(hgvs_value: str, short_value: Optional[str] = None):
+        nonlocal mutation, target_token, target_type
+        mutation = hgvs_value
+        target_token = short_value or hgvs_value
         target_type = "mutation"
+
+    if variants and isinstance(variants, list):
+        first_variant = variants[0]
+        if isinstance(first_variant, str):
+            spelled = _extract_spelled_mutation(first_variant)
+            if spelled:
+                hgvs_val, short_val = spelled
+                _apply_mutation(hgvs_val, short_val)
+            elif re.search(r"[A-Z][0-9]{1,5}[A-Z*]", first_variant):
+                _apply_mutation(first_variant, first_variant)
+            else:
+                _apply_mutation(first_variant, first_variant)
     else:
         if isinstance(name, str) and re.search(r"[A-Z][0-9]{1,5}[A-Z*]", name):
-            mutation = name
-            target_token = name
-            target_type = "mutation"
+            _apply_mutation(name, name)
         else:
             target_type = "protein" if protein else (ftype or "other")
             target_token = name or protein or ftype
@@ -321,13 +413,6 @@ def _convert_bio_schema_feature(f: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pos = None
 
-    out["mutation"] = mutation
-    out["target_token"] = target_token
-    out["target_type"] = target_type
-    out["position"] = pos
-    if motif:
-        out["motif"] = motif
-
     eff = f.get("effect_or_function") or {}
     out["effect_summary"] = eff.get("description") or ""
     out["effect_category"] = eff.get("category") or ""
@@ -344,6 +429,33 @@ def _convert_bio_schema_feature(f: Dict[str, Any]) -> Dict[str, Any]:
         out["confidence"] = float(conf.get("score_0_to_1"))
     except Exception:
         pass
+
+    if not mutation:
+        search_texts: List[str] = []
+        if isinstance(name, str):
+            search_texts.append(name)
+        if isinstance(variants, list):
+            search_texts.extend([v for v in variants if isinstance(v, str)])
+        if out.get("effect_summary"):
+            search_texts.append(out["effect_summary"])
+        if snippet:
+            search_texts.append(snippet)
+        for extra in f.get("evidence_quotes") or []:
+            if isinstance(extra, str):
+                search_texts.append(extra)
+        for text in search_texts:
+            spelled = _extract_spelled_mutation(text)
+            if spelled:
+                hgvs_val, short_val = spelled
+                _apply_mutation(hgvs_val, short_val)
+                break
+
+    out["mutation"] = mutation
+    out["target_token"] = target_token
+    out["target_type"] = target_type
+    out["position"] = pos
+    if motif:
+        out["motif"] = motif
 
     return out
 
@@ -377,10 +489,15 @@ def clean_and_ground(raw: Dict[str, Any],
 
         # Evidence: allow slight paraphrase/truncation when permissive
         quotes = [q for q in (f.get("evidence_quotes") or []) if isinstance(q, str) and q.strip()]
+        expanded_quotes = []
+        for q in quotes:
+            expanded = _expand_to_sentence(full_text, q)
+            expanded_quotes.append(expanded if expanded else q.strip())
+
         quote_ok = False
-        if quotes and isinstance(full_text, str):
-            for q in quotes:
-                ql = _normalize_ws(q).lower()
+        if expanded_quotes and isinstance(full_text, str):
+            for usable in expanded_quotes:
+                ql = _normalize_ws(usable).lower()
                 if ql in norm_text:
                     quote_ok = True
                     break
@@ -388,6 +505,8 @@ def clean_and_ground(raw: Dict[str, Any],
             quote_ok = True
         if not quote_ok:
             continue
+        if expanded_quotes:
+            f["evidence_quotes"] = expanded_quotes
 
         # Normalize category
         cat = (f.get("effect_category") or "").strip()
