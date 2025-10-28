@@ -1,96 +1,131 @@
 # prompts.py — central place to manage the bioinformatician's extraction prompt
 from dataclasses import dataclass
 
+
 @dataclass
 class AnalystPrompts:
-    analyst_prompt: str = r"""
-"You are a biomedical text-mining expert tasked with extracting Sequence Features (SFs) from viral or microbial protein literature.\n"
-    "A Sequence Feature (SF) refers to any amino acid region, residue, motif, or mutation that plays a key role in protein structure, function, or phenotype.\n"
-    "Extract as many features as you can find, including active sites, binding sites, mutations, regions, and other significant sequence-related elements.\n"
-    "Include comparative findings from closely related strains or surrogate alphaviruses whenever the paper uses them to explain or predict the protein’s behavior—note the organism if it differs.\n"
-    "If there are multiple features mentioned in the text, capture all of them. Provide every unique feature in the form of a JSON array.\n"
-These may include:
-• Active sites, binding sites, or motifs (e.g., “His57-Asp81-Ser139 catalytic triad”)
-• Structural domains or regions (e.g., “Region 1 (1–80 aa), basic RNA-binding region”)
-• Post-translational modification sites (e.g., “palmitoylation at 417–419 aa”)
-• Interaction interfaces (e.g., “hydrophobic pocket residues Val130, Trp245 interact with E2”)
-• Mutations or variants with measurable effects (e.g., “A226V enhances fusion”)
-• Signal peptides, cleavage sites, or nuclear localization/export signals
-Your output must be a JSON array, each entry representing one feature.
- 
-Output Schema
+    chunking_wrapper: str = """When input exceeds 6000 tokens, process in independent chunks. Do not reference content outside the current chunk.
+Never recap prior chunks. Return a valid JSON array for this chunk only.
+Send the PDF as text in ~4–6k-token chunks. Run Prompt A for each chunk. You’ll get one JSON array per chunk."""
+
+    post_validation_recipe: str = """Validate: reject any response that fails json.loads().
+Normalize: fill missing optional arrays with [], optional strings with null. Enforce "continuity" values against the allowed set.
+Merge (dedup within a paper): key by (virus, protein, feature.type, feature.name_or_label, residue_positions | specific_residues | variants).
+If two records overlap (same type and positions ±2 aa) and effects agree, keep one; prefer higher confidence.score_0_to_1; concatenate distinct evidence_snippets (dedupe).
+If effects conflict (e.g., increase vs decrease), keep both and flag downstream for review."""
+
+    analyst_prompt: str = """Respond only in JSON. If you cannot find any features, respond [].
+All fields are required; if unknown, use null or empty array.
+Before constructing the JSON, internally scan the entire TEXT for every protein, amino-acid residue/range, motif, and mutation token. Use that internal list to ensure you decision every explicit mention is evaluated. Never output the intermediate list.
+
+SYSTEM / INSTRUCTION
+You are a biomedical text-mining specialist. Extract Sequence Features (SFs) from scientific text about viruses.
+
+DEFINITIONS
+A Sequence Feature (SF) is any amino-acid feature with biological significance:
+• regions/domains with coordinates (e.g., “Region 1 (1–80 aa) binds RNA”)
+• discontinuous sites (e.g., “His57–Asp81–Ser139 catalytic triad”)
+• mutations/variants (e.g., “A226V increases vector transmission”)
+• motifs (e.g., “ATLG” motif), PTMs (e.g., palmitoylation 417–419)
+• interaction interfaces (e.g., “Tyr47 (E3) – Tyr48 (E2)”)
+• signals (NLS/NES/cleavage sites) tied to function/phenotype
+
+OUTPUT RULES (format-lock)
+• Respond ONLY with a valid JSON array that passes json.loads().
+• No prose, no markdown, no trailing commas, no comments.
+• One JSON object per feature (do not merge multiple features from one sentence).
+• Use residue numbering as reported (do not renumber).
+• Keep evidence as a short quote (≤30 words) from the text segment.
+
+SCHEMA
+Each array element must follow exactly:
+{
+  "virus": "Chikungunya virus",
+  "protein": "<protein name or complex>",
+  "feature": {
+    "name_or_label": "<e.g., Region 1 | A226V | catalytic triad | NLS>",
+    "type": "<mutation_effect | motif | region | domain | active_site | binding_site | interaction_site | modification | signal | other>",
+    "continuity": "<continuous | discontinuous | point | unknown>",
+    "residue_positions": [{"start": <int>, "end": <int>}],
+    "specific_residues": [{"position": <int>, "aa": "<1-letter code or 'A→V'>"}],
+    "variants": ["<HGVS p. notation if applicable>"],
+    "motif_pattern": "<motif string or null>"
+  },
+  "effect_or_function": {
+    "description": "<one sentence on function/effect>",
+    "category": "<binding_affinity | replication | virulence | vector_adaptation | immune_evasion | catalytic_activity | assembly | localization | structural | stability | processing | unknown>",
+    "direction": "<increase | decrease | loss | gain | modulates | none | unknown>",
+    "evidence_level": "<experimental | computational | inferred>"
+  },
+  "interactions": {
+    "partner_protein": "<binding partner or null>",
+    "interaction_type": "<binding | inhibition | activation | cleavage | assembly | modulation | other | null>",
+    "context": "<brief context or null>"
+  },
+  "evidence_snippet": "<verbatim (≤30 words) including residues/coords>",
+  "confidence": { "score_0_to_1": <float>, "rationale": "<≤20 words on clarity/evidence>" }
+}
+
+FEW-SHOT EXAMPLES (keep these)
 [
   {
-    "pmid_or_doi": "<PubMed ID or DOI if available>",
-    "virus": "<virus or organism>",
-    "protein": "<protein name>",
+    "virus": "Chikungunya virus",
+    "protein": "E1",
     "feature": {
-      "name_or_label": "<Region 1 | catalytic triad | E484K | NLS | etc.>",
-      "type": "<active_site | binding_site | motif | mutation_effect | region | epitope | domain | modification | signal | other>",
-      "continuity": "<continuous | discontinuous>",
-      "residue_positions": [ {"start": <int>, "end": <int>} ],
-      "specific_residues": [ {"position": <int>, "aa": "<1-letter code>"} ],
-      "variants": ["p.Ala226Val", "p.Glu484Lys"],
-      "motif_pattern": "<e.g., HExxH or Arg-Lys-Pro-rich | null>"
+      "name_or_label": "A226V",
+      "type": "mutation_effect",
+      "continuity": "point",
+      "residue_positions": [],
+      "specific_residues": [{"position": 226, "aa": "A→V"}],
+      "variants": ["p.Ala226Val"],
+      "motif_pattern": null
     },
     "effect_or_function": {
-      "description": "<text summary of biological or biochemical function>",
-      "category": "<binding_affinity | virulence | replication | tropism | stability | structural_role | catalytic_activity | immune_escape | unknown>",
-      "direction": "<increase | decrease | loss | gain | none | unknown>",
-      "evidence_level": "<experimental | computational | inferred>"
+      "description": "Enhances transmission by Aedes albopictus and increases cholesterol-dependent membrane fusion.",
+      "category": "vector_adaptation",
+      "direction": "increase",
+      "evidence_level": "experimental"
     },
-    "interactions": {
-      "partner_protein": "<if mentioned, e.g., host receptor, viral subunit>",
-      "interaction_type": "<binding | inhibition | activation | cleavage | assembly>",
-      "context": "<capsid–E2 interface | with host ACE2 | etc.>"
-    },
-    "evidence_snippet": "<exact quoted or near-verbatim text supporting this feature>",
-    "confidence": { "score_0_to_1": <float>, "rationale": "<why confidence is high or low>" }
-  }
-]
- 
-Guidelines for the Model
-1.	Identify sequence-linked facts:
-Focus on any statement that ties a residue number, amino acid identity, or range of residues to a biological or biochemical property, including evidence sourced from related alphaviruses when explicitly used for comparison.
-2.	Normalize numbering as reported:
-Do not renumber to canonical coordinates unless explicitly mapped.
-(Use "numbering_system": "as reported" if unspecified.)
-3.	Handle discontinuous sites:
-When multiple residues are part of one functional feature (e.g., catalytic triad), list each in "specific_residues" and set "continuity": "discontinuous".
-4.	Mutations:
-When amino acid substitutions are mentioned (e.g., E1:A226V), create separate entries for each variant, include HGVS-style "p.Glu484Lys" notation, and specify their effect direction.
-Capture mutations regardless of wording—convert spelled-out forms such as "alanine 226 to valine" or "Ala 226 → Val" into both HGVS (`p.Ala226Val`) and concise tokens (`A226V`).
-5.	Quotes & evidence:
-Each JSON object must include a short snippet (≤30 words) capturing the evidence from the text — typically the sentence or clause containing residue indices or function.
-6.	Confidence scoring:
-o	0.9–1.0 → directly measured experimentally with explicit residues
-o	0.6–0.8 → clearly stated but inferred or from modeling
-o	0.3–0.5 → speculative or indirectly stated
- 
-Example (applied to CHIKV capsid)
-[
+    "interactions": {"partner_protein": null, "interaction_type": null, "context": null},
+    "evidence_snippet": "The single-point mutation A226V in E1 increased transmission by Ae. albopictus.",
+    "confidence": { "score_0_to_1": 0.95, "rationale": "Explicit residue; replicated effect." }
+  },
   {
     "virus": "Chikungunya virus",
     "protein": "Capsid",
     "feature": {
-      "name_or_label": "Region 1",
-      "type": "region",
-      "continuity": "continuous",
-      "residue_positions": [{"start":1, "end":80}],
-      "specific_residues": [],
+      "name_or_label": "Catalytic triad",
+      "type": "active_site",
+      "continuity": "discontinuous",
+      "residue_positions": [{"start": 139, "end": 139}, {"start": 161, "end": 161}, {"start": 213, "end": 213}],
+      "specific_residues": [{"position": 139, "aa": "H"}, {"position": 161, "aa": "D"}, {"position": 213, "aa": "S"}],
       "variants": [],
-      "motif_pattern": "Arg-, Lys-, and Pro-rich"
+      "motif_pattern": null
     },
     "effect_or_function": {
-      "description": "Binds RNA in a non-specific manner and may inhibit host transcription.",
-      "category": "binding_affinity",
-      "direction": "unknown",
+      "description": "Serine protease that self-cleaves in cis and self-inactivates via C-terminal Trp binding.",
+      "category": "catalytic_activity",
+      "direction": "modulates",
       "evidence_level": "experimental"
     },
-    "evidence_snippet": "Region 1 (1–80 aa) being highly basic in nature is proposed to bind RNA.",
-    "confidence": { "score_0_to_1": 0.8, "rationale": "Residue range and function explicitly described." }
+    "interactions": {"partner_protein": "Capsid C-terminus", "interaction_type": "binding", "context": "auto-inactivation via Trp"},
+    "evidence_snippet": "His139, Asp161, and Ser213 form the catalytic triad; the protease cleaves itself in cis.",
+    "confidence": { "score_0_to_1": 0.9, "rationale": "Clear residues and function." }
   }
 ]
+
+INSTRUCTIONS
+• If multiple features appear in one sentence, output multiple JSON objects (one per feature).
+• If ranges are textual (e.g., “~244–263 aa”), capture integers only (244–263).
+• If only qualitative phrases (e.g., “N-terminus important”) with no coordinates/residues → skip.
+• Prefer experimental evidence; if unclear, set evidence_level = "inferred" or "computational".
+• Set motif_pattern for sequence motifs (e.g., "HExxH", "ATLG"); else null.
+• When interactions between proteins are described, populate the interactions block; otherwise set each field to null.
+• Ensure every protein or mutation identified in your preparatory scan is either extracted as a feature or explicitly discarded for lacking residue-level detail (in which case do not invent a feature).
+
+TEXT
+{TEXT}
 """
+
 
 PROMPTS = AnalystPrompts()

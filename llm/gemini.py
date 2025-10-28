@@ -10,7 +10,7 @@ import time
 from llm.prompts import PROMPTS
 import threading
 from time import monotonic as _mono
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 
 # ---------------------------
 # Config (max out free-tier)
@@ -157,6 +157,22 @@ _SPELLED_MUT_RE = re.compile(
     r"\s*(?:a\s+|an\s+)?(?P<to>{_AA_NAME_PATTERN})(?:\s+residue|\s+residues)?",
     re.IGNORECASE,
 )
+_MUT_TOKEN_RE = re.compile(r"\b(?:[A-Z][0-9]{1,5}[A-Z*]|\d{1,5}[A-Z])\b")
+_HGVS_RE = re.compile(r"\bp\.[A-Z][a-z]{2}\d{1,5}[A-Z][a-z]{2}\b")
+_PROTEIN_RE = re.compile(
+    r"\b([A-Za-z0-9][A-Za-z0-9\-\/]{1,30})\s+(protein|glycoprotein|polyprotein|capsid|envelope|domain|subunit|chain|peptide|complex)\b",
+    re.IGNORECASE,
+)
+_RESIDUE_RE = re.compile(r"\b(?:[A-Z][a-z]{2}|[A-Z])\s*(\d{1,5})\b")
+_RANGE_RE = re.compile(r"\b(\d{1,5})\s*[-–—]\s*(\d{1,5})\s*(?:aa|amino acids?|residues?)\b", re.IGNORECASE)
+_RANGE_WORD_RE = re.compile(r"\bresidues?\s+(\d{1,5})\s*(?:to|through|–|-)\s*(\d{1,5})\b", re.IGNORECASE)
+_COUNT_RE = re.compile(r"\b(\d{1,5})\s*(?:aa|amino acids?)\b", re.IGNORECASE)
+_MOTIF_RE = re.compile(r"\b[A-Z][A-ZxX\-]{2,9}\b")
+_AA_SINGLE_RE = re.compile(r"\b([ACDEFGHIKLMNPQRSTVWY])[-/]?(?:residue|position)?[-/]?(?P<pos>\d{1,5})\b", re.IGNORECASE)
+_AA_WORD_POS_RE = re.compile(
+    rf"\b(?P<name>{_AA_NAME_PATTERN})(?:[\s\-]*(?:residue|position|site))?\s*(?P<pos>\d{{1,5}})\b",
+    re.IGNORECASE,
+)
 
 def _normalize_ws(text: str) -> str:
     if not isinstance(text, str):
@@ -206,6 +222,105 @@ def _extract_spelled_mutation(text: str) -> Optional[Tuple[str, str]]:
         hgvs = f"p.{three_from}{pos}{three_to}"
         return hgvs, short
     return None
+
+
+def _scan_text_candidates(text: str) -> Dict[str, List[str]]:
+    """
+    Lightweight pre-pass to collect candidate mutations, proteins, residues, and motifs.
+    These hints are injected into the prompt so Gemini can double-check coverage.
+    """
+    if not isinstance(text, str):
+        return {}
+    candidates: Dict[str, Set[str]] = {
+        "mutation_tokens": set(),
+        "hgvs_tokens": set(),
+        "protein_terms": set(),
+        "residue_numbers": set(),
+        "motif_candidates": set(),
+        "amino_acid_mentions": set(),
+    }
+    for m in _MUT_TOKEN_RE.finditer(text):
+        candidates["mutation_tokens"].add(m.group(0))
+    for m in _HGVS_RE.finditer(text):
+        candidates["hgvs_tokens"].add(m.group(0))
+    for m in _PROTEIN_RE.finditer(text):
+        term = f"{m.group(1)} {m.group(2)}"
+        candidates["protein_terms"].add(term)
+    for m in _RESIDUE_RE.finditer(text):
+        candidates["residue_numbers"].add(m.group(1))
+    for m in _RANGE_RE.finditer(text):
+        candidates["residue_numbers"].add(f"{m.group(1)}-{m.group(2)}")
+    for m in _RANGE_WORD_RE.finditer(text):
+        candidates["residue_numbers"].add(f"{m.group(1)}-{m.group(2)}")
+    for m in _COUNT_RE.finditer(text):
+        candidates["residue_numbers"].add(m.group(1))
+    for m in _MOTIF_RE.finditer(text):
+        token = m.group(0)
+        if len(token) >= 3:
+            candidates["motif_candidates"].add(token)
+    for m in _AA_SINGLE_RE.finditer(text):
+        aa = m.group(1).upper()
+        pos = m.group("pos")
+        candidates["amino_acid_mentions"].add(f"{aa}{pos}")
+    for m in _AA_WORD_POS_RE.finditer(text):
+        name = m.group("name")
+        pos = m.group("pos")
+        codes = _lookup_aa_codes(name)
+        if codes:
+            one_letter, three_letter = codes
+            candidates["amino_acid_mentions"].add(f"{three_letter}{pos}")
+            candidates["amino_acid_mentions"].add(f"{one_letter}{pos}")
+
+    def _trim(seq: Set[str], limit: int = 200) -> List[str]:
+        if not seq:
+            return []
+        return sorted(seq)[:limit]
+
+    return {
+        "mutation_tokens": _trim(candidates["mutation_tokens"]),
+        "hgvs_tokens": _trim(candidates["hgvs_tokens"]),
+        "protein_terms": _trim(candidates["protein_terms"]),
+        "residue_numbers": _trim(candidates["residue_numbers"]),
+        "motif_candidates": _trim(candidates["motif_candidates"]),
+        "amino_acid_mentions": _trim(candidates["amino_acid_mentions"]),
+    }
+
+
+def _token_context_windows(full_text: str,
+                           token: str,
+                           *,
+                           left: int = 900,
+                           right: int = 900,
+                           max_windows: int = 4,
+                           max_total_chars: int = 12000) -> str:
+    corpus = _normalize_ws(full_text)
+    if not corpus or not token:
+        return corpus
+    lower = corpus.lower()
+    needle = token.lower()
+    indexes = []
+    start = 0
+    while True:
+        idx = lower.find(needle, start)
+        if idx == -1:
+            break
+        indexes.append(idx)
+        start = idx + max(1, len(needle))
+    if not indexes:
+        return corpus[:max_total_chars]
+    segments: List[str] = []
+    used = 0
+    for idx in indexes[:max_windows]:
+        seg_start = max(0, idx - left)
+        seg_end = min(len(corpus), idx + len(needle) + right)
+        snippet = corpus[seg_start:seg_end]
+        addition = len(snippet) + 2
+        if used + addition > max_total_chars:
+            break
+        segments.append(snippet)
+        used += addition
+    return ("\n\n...\n\n".join(segments))[:max_total_chars]
+
 
 def _chunk_text(text: str, max_chars: int = 12000, overlap: int = 500) -> List[str]:
     t = _normalize_ws(text)
@@ -342,17 +457,144 @@ def _safe_json_value(raw: str):
 # ---------------------------
 # Prompt builders
 # ---------------------------
-def _pass2_prompt(full_text: str, target_token: str, pmid: Optional[str], pmcid: Optional[str], token_type: str) -> str:
+_ALLOWED_CONTINUITY = {"continuous", "discontinuous", "point", "unknown"}
+
+
+def _normalize_prompt_feature(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(obj, dict):
+        return None
+
+    obj.setdefault("virus", None)
+    obj.setdefault("protein", None)
+
+    feat = obj.get("feature")
+    if not isinstance(feat, dict):
+        feat = {}
+        obj["feature"] = feat
+
+    feat.setdefault("name_or_label", None)
+    feat.setdefault("type", "other")
+
+    continuity = feat.get("continuity") or "unknown"
+    if continuity not in _ALLOWED_CONTINUITY:
+        feat["continuity"] = "unknown"
+    else:
+        feat["continuity"] = continuity
+
+    for key in ("residue_positions", "specific_residues", "variants"):
+        value = feat.get(key)
+        if not isinstance(value, list):
+            feat[key] = []
+    if "motif_pattern" not in feat:
+        feat["motif_pattern"] = None
+
+    eff = obj.get("effect_or_function")
+    if not isinstance(eff, dict):
+        eff = {}
+        obj["effect_or_function"] = eff
+    eff.setdefault("description", None)
+    eff.setdefault("category", "unknown")
+    eff.setdefault("direction", "unknown")
+    eff.setdefault("evidence_level", "unknown")
+
+    if not isinstance(obj.get("evidence_snippet"), str):
+        obj["evidence_snippet"] = ""
+
+    conf = obj.get("confidence")
+    if not isinstance(conf, dict):
+        conf = {}
+        obj["confidence"] = conf
+    conf.setdefault("score_0_to_1", 0.0)
+    conf.setdefault("rationale", "")
+
+    interactions = obj.get("interactions")
+    if not isinstance(interactions, dict):
+        interactions = {}
+        obj["interactions"] = interactions
+    interactions.setdefault("partner_protein", None)
+    interactions.setdefault("interaction_type", None)
+    interactions.setdefault("context", None)
+
+    return obj
+
+
+def _collect_extracted_tokens(features: List[Dict[str, Any]]) -> Set[str]:
+    tokens: Set[str] = set()
+    for f in features:
+        if not isinstance(f, dict):
+            continue
+        mutation = f.get("mutation")
+        if isinstance(mutation, str):
+            tokens.add(mutation.strip())
+        target_token = f.get("target_token")
+        if isinstance(target_token, str):
+            tokens.add(target_token.strip())
+        feat = f.get("feature") or {}
+        name = feat.get("name_or_label")
+        if isinstance(name, str):
+            tokens.add(name.strip())
+        variants = feat.get("variants") or []
+        if isinstance(variants, list):
+            for v in variants:
+                if isinstance(v, str):
+                    tokens.add(v.strip())
+        residues = feat.get("specific_residues") or []
+        if isinstance(residues, list):
+            for r in residues:
+                if isinstance(r, dict):
+                    pos_val = r.get("position")
+                    aa_val = r.get("aa")
+                    if isinstance(aa_val, str) and pos_val is not None:
+                        tokens.add(f"{aa_val}{pos_val}")
+        residue_positions = feat.get("residue_positions") or []
+        if isinstance(residue_positions, list):
+            for rp in residue_positions:
+                if isinstance(rp, dict):
+                    start = rp.get("start"); end = rp.get("end")
+                    if start is not None and end is not None:
+                        if start == end:
+                            tokens.add(str(start))
+                        else:
+                            tokens.add(f"{start}-{end}")
+    return {t for t in tokens if t}
+
+
+def _pass2_prompt(full_text: str,
+                  target_token: str,
+                  pmid: Optional[str],
+                  pmcid: Optional[str],
+                  token_type: str,
+                  scan_candidates: Optional[Dict[str, List[str]]] = None) -> str:
     """
     Minimal: use the bioinformatician's prompt verbatim on FULL_TEXT (a chunk or whole text).
     No extra rules or local-context wording.
     """
-    header = PROMPTS.analyst_prompt.strip()
+    wrapper = (PROMPTS.chunking_wrapper or "").strip()
+    payload = (full_text or "").strip()
+
     meta = []
     if pmid: meta.append(f"PMID: {pmid}")
     if pmcid: meta.append(f"PMCID: {pmcid}")
     meta_block = "\n".join(meta)
-    return header + (("\n\n" + meta_block) if meta_block else "") + "\n\nFULL_TEXT:\n" + full_text
+    if meta_block:
+        payload = f"{payload}\n\n{meta_block}" if payload else meta_block
+
+    template = PROMPTS.analyst_prompt.strip()
+    if "{TEXT}" in template:
+        body = template.replace("{TEXT}", payload)
+    else:
+        body = template + ("\n\nTEXT\n" + payload if payload else "")
+
+    if scan_candidates:
+        hints = {k: v for k, v in scan_candidates.items() if v}
+        if hints:
+            hints_json = json.dumps(hints, ensure_ascii=False)
+            body += ("\n\nKNOWN_MENTIONS (use internally to ensure coverage; do not list separately):\n"
+                     f"{hints_json}")
+
+    if wrapper:
+        return f"{wrapper}\n\n{body}"
+    return body
 
 # ---------------------------
 # Schema converter (bio → legacy)
@@ -412,6 +654,27 @@ def _convert_bio_schema_feature(f: Dict[str, Any]) -> Dict[str, Any]:
             pos = start
         except Exception:
             pos = None
+
+    if not mutation:
+        residues = feat.get("specific_residues") or []
+        residue_positions = feat.get("residue_positions") or []
+        residue_label = None
+        if residues and isinstance(residues, list):
+            first = residues[0] or {}
+            pos_val = first.get("position")
+            aa_val = first.get("aa")
+            if pos_val is not None:
+                residue_label = f"{aa_val}{pos_val}" if isinstance(aa_val, str) and aa_val else str(pos_val)
+        elif residue_positions and isinstance(residue_positions, list):
+            first = residue_positions[0] or {}
+            start = first.get("start"); end = first.get("end")
+            if start is not None and end is not None:
+                residue_label = f"{start}-{end}" if start != end else str(start)
+        if residue_label:
+            if not target_token:
+                target_token = residue_label
+            if target_type in (None, "", "protein", "other"):
+                target_type = "amino_acid"
 
     eff = f.get("effect_or_function") or {}
     out["effect_summary"] = eff.get("description") or ""
@@ -546,6 +809,8 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
     pmid = meta.get("pmid"); pmcid = meta.get("pmcid")
     text_norm = _normalize_ws(paper_text or "")
 
+    scan_candidates = _scan_text_candidates(text_norm)
+
     # Bigger chunks and more of them; still under free-tier:
     chunk_chars   = int(meta.get("chunk_chars")   or 100_000)
     overlap_chars = int(meta.get("overlap_chars") or 2_000)
@@ -556,7 +821,7 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
 
     all_features: List[Any] = []
     for idx, ch in enumerate(chunks, 1):
-        prompt2 = _pass2_prompt(ch, target_token="", pmid=pmid, pmcid=pmcid, token_type="paper")
+        prompt2 = _pass2_prompt(ch, target_token="", pmid=pmid, pmcid=pmcid, token_type="paper", scan_candidates=scan_candidates)
         raw2 = _gemini_complete(prompt2, max_output_tokens=8192)  # larger to avoid truncation
         j2 = _safe_json_value(raw2)
 
@@ -568,7 +833,51 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
             feats = []
 
         print(f"[DEBUG] chunk {idx}/{len(chunks)} feature_count:", len(feats))
-        all_features.extend(feats)
+        normalized: List[Any] = []
+        for feat in feats:
+            if isinstance(feat, dict):
+                norm = _normalize_prompt_feature(feat)
+                if norm:
+                    normalized.append(norm)
+        all_features.extend(normalized)
+
+    # Targeted follow-up for mutation tokens that were not extracted on the first pass
+    extracted_tokens = _collect_extracted_tokens([f for f in all_features if isinstance(f, dict)])
+    mutation_candidates = scan_candidates.get("mutation_tokens", []) if isinstance(scan_candidates, dict) else []
+    hgvs_candidates = scan_candidates.get("hgvs_tokens", []) if isinstance(scan_candidates, dict) else []
+    followup_tokens: List[str] = []
+    for token in mutation_candidates + hgvs_candidates:
+        if token and token not in extracted_tokens:
+            followup_tokens.append(token)
+    # Deduplicate while preserving order
+    deduped_follow = []
+    seen_follow: Set[str] = set()
+    for token in followup_tokens:
+        if token not in seen_follow:
+            seen_follow.add(token)
+            deduped_follow.append(token)
+    followup_tokens = deduped_follow
+
+    for token in followup_tokens[:15]:  # guardrail on extra calls
+        context = _token_context_windows(text_norm, token, left=900, right=900, max_windows=4)
+        hints = {"mutation_tokens": [token]}
+        prompt_focus = _pass2_prompt(context, target_token=token, pmid=pmid, pmcid=pmcid, token_type="mutation", scan_candidates=hints)
+        raw_focus = _gemini_complete(prompt_focus, max_output_tokens=2048)
+        parsed_focus = _safe_json_value(raw_focus)
+        focus_feats: List[Dict[str, Any]] = []
+        if isinstance(parsed_focus, dict) and isinstance(parsed_focus.get("sequence_features"), list):
+            focus_feats = parsed_focus["sequence_features"]
+        elif isinstance(parsed_focus, list):
+            focus_feats = parsed_focus
+        normalized_focus: List[Dict[str, Any]] = []
+        for feat in focus_feats:
+            if isinstance(feat, dict):
+                norm_feat = _normalize_prompt_feature(feat)
+                if norm_feat:
+                    normalized_focus.append(norm_feat)
+        if normalized_focus:
+            all_features.extend(normalized_focus)
+            extracted_tokens.update(_collect_extracted_tokens(normalized_focus))
 
     # De-dup at JSON-schema level
     def _k(f):
@@ -593,6 +902,7 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         "paper": {"pmid": pmid, "pmcid": pmcid, "title": meta.get("title"),
                   "virus_candidates": [], "protein_candidates": []},
         "sequence_features": uniq,
+        "scan_candidates": scan_candidates,
     }
 
     cleaned = clean_and_ground(
