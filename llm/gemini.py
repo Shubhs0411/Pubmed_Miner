@@ -179,6 +179,18 @@ def _normalize_ws(text: str) -> str:
         return ""
     return " ".join(text.split())
 
+def _normalize_for_match(text: str) -> str:
+    """Downcase, strip spacing/punctuation, and fold accents so comparisons survive mojibake."""
+    if not isinstance(text, str) or not text:
+        return ""
+    import unicodedata
+
+    try:
+        nfkd = unicodedata.normalize("NFKD", text)
+    except Exception:
+        nfkd = text
+    ascii_text = nfkd.encode("ascii", "ignore").decode("ascii", "ignore")
+    return "".join(ch for ch in ascii_text.lower() if ch.isalnum())
 def _expand_to_sentence(full_text: str, fragment: str) -> Optional[str]:
     """
     Locate the sentence in full_text that contains the fragment.
@@ -743,6 +755,7 @@ def clean_and_ground(raw: Dict[str, Any],
         feats = [_convert_bio_schema_feature(x) for x in feats]
     kept = []
     norm_text = _normalize_ws(full_text).lower() if isinstance(full_text, str) else ""
+    norm_text_ascii = _normalize_for_match(full_text) if isinstance(full_text, str) else ""
     for f in feats:
         if not isinstance(f, dict):
             continue
@@ -762,6 +775,10 @@ def clean_and_ground(raw: Dict[str, Any],
             for usable in expanded_quotes:
                 ql = _normalize_ws(usable).lower()
                 if ql in norm_text:
+                    quote_ok = True
+                    break
+                ql_ascii = _normalize_for_match(usable)
+                if ql_ascii and ql_ascii in norm_text_ascii:
                     quote_ok = True
                     break
         if not quote_ok and not require_mutation_in_quote:
