@@ -119,6 +119,7 @@ _ALLOWED_CATEGORIES = {
 _ALLOWED_CONTINUITY = {"continuous", "discontinuous", "point", "unknown"}
 
 # Compile once for performance
+_STANDARD_MUT_RE = re.compile(r"^[A-Z]\d+[A-Z*]$")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9(])")
 _MUT_TOKEN_RE = re.compile(r"\b(?:[A-Z][0-9]{1,5}[A-Z*]|\d{1,5}[A-Z])\b")
 _HGVS_RE = re.compile(r"\bp\.[A-Z][a-z]{2}\d{1,5}[A-Z][a-z]{2}\b")
@@ -762,7 +763,11 @@ def clean_and_ground(raw: Dict[str, Any],
                      require_mutation_in_quote: bool = False,
                      require_target_in_quote: Optional[bool] = None,
                      min_confidence: float = 0.0) -> Dict[str, Any]:
-    """Clean and validate extracted features (UNCHANGED LOGIC)."""
+    """
+    Clean and validate extracted features with EARLY confidence filtering.
+    
+    CRITICAL FIX: Calculate confidence BEFORE filtering to ensure min_confidence works.
+    """
     if require_target_in_quote is None:
         require_target_in_quote = require_mutation_in_quote
     
@@ -824,33 +829,80 @@ def clean_and_ground(raw: Dict[str, Any],
         if cat and cat not in _ALLOWED_CATEGORIES:
             f["effect_category"] = "other"
 
-        # Confidence scoring (simple, permissive)
+        # ===== CONFIDENCE SCORING (IMPROVED & EARLIER) =====
         conf = 0.0
-        if quotes:
-            conf += 0.6
         
+        # Determine feature type for adaptive scoring
+        target_type = f.get("target_type") or ""
+        effect_cat = (f.get("effect_category") or "").lower()
+        
+        # 1. Evidence quality (40% weight)
+        if quotes:
+            conf += 0.4
+            # Bonus for multiple independent quotes
+            if len(quotes) > 1:
+                conf += 0.05
+        
+        # 2. Position specificity (15% weight)
+        # For structural regions, check residue_positions instead of just position
         pos = f.get("position")
+        has_position = False
         try:
             if isinstance(pos, int) or (isinstance(pos, str) and pos.strip().isdigit()):
-                conf += 0.1
+                has_position = True
+                conf += 0.15
         except Exception:
             pass
         
+        # Alternative: check for residue_positions (domain ranges)
+        if not has_position:
+            residue_pos = f.get("residue_positions") or []
+            if residue_pos and isinstance(residue_pos, list):
+                for rp in residue_pos:
+                    if isinstance(rp, dict) and rp.get("start") is not None:
+                        conf += 0.15
+                        break
+        
+        # 3. Mutation format quality OR structural annotation (15% weight)
+        mutation = (f.get("mutation") or "").strip()
+        if mutation:
+            # Standard format like A226V
+            if _STANDARD_MUT_RE.match(mutation):
+                conf += 0.15
+            # Partial credit for other formats
+            elif re.search(r'\d+', mutation):
+                conf += 0.08
+        else:
+            # No mutation but has structural annotation (domain, region, etc.)
+            if target_type in ("protein", "region", "domain") or effect_cat == "structural":
+                # Give credit for valid structural feature
+                conf += 0.12
+        
+        # 4. Protein context (10% weight)
+        if f.get("protein"):
+            conf += 0.10
+        
+        # 5. Virus context (5% weight)
+        if f.get("virus"):
+            conf += 0.05
+        
+        # 6. Experimental context (10% weight)
         ctx = f.get("experiment_context") or {}
         if any(ctx.get(k) for k in ("system", "assay", "temperature")):
-            conf += 0.1
+            conf += 0.10
         
-        if f.get("effect_category"):
-            conf += 0.1
+        # 7. Effect description (5% weight)
+        if f.get("effect_category") and f.get("effect_category") != "unknown":
+            conf += 0.05
         
-        if f.get("mutation") in (None, "") and f.get("target_type") == "protein":
-            conf = min(1.0, conf + 0.1)
-        
+        # Cap at 1.0
         f["confidence"] = min(conf, 1.0)
 
+        # ===== APPLY MIN_CONFIDENCE FILTER HERE (CRITICAL FIX) =====
         if f["confidence"] < float(min_confidence or 0.0):
             continue
 
+        # Fix mutation field if needed
         if not f.get("mutation") and f.get("target_token"):
             if f.get("target_type") == "mutation":
                 f["mutation"] = f["target_token"]
@@ -858,7 +910,6 @@ def clean_and_ground(raw: Dict[str, Any],
         kept.append(f)
     
     return {"paper": paper, "sequence_features": kept}
-
 
 def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """

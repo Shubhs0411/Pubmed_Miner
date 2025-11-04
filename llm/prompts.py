@@ -1,4 +1,4 @@
-# prompts.py — central place to manage the bioinformatician's extraction prompt
+# prompts.py — UPDATED to extract structural domains and regions
 from dataclasses import dataclass
 
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass
 class AnalystPrompts:
     chunking_wrapper: str = """When input exceeds 6000 tokens, process in independent chunks. Do not reference content outside the current chunk.
 Never recap prior chunks. Return a valid JSON array for this chunk only.
-Send the PDF as text in ~4–6k-token chunks. Run Prompt A for each chunk. You’ll get one JSON array per chunk."""
+Send the PDF as text in ~4–6k-token chunks. Run Prompt A for each chunk. You'll get one JSON array per chunk."""
 
     post_validation_recipe: str = """Validate: reject any response that fails json.loads().
 Normalize: fill missing optional arrays with [], optional strings with null. Enforce "continuity" values against the allowed set.
@@ -16,26 +16,32 @@ If effects conflict (e.g., increase vs decrease), keep both and flag downstream 
 
     analyst_prompt: str = """Respond only in JSON. If you cannot find any features, respond [].
 All fields are required; if unknown, use null or empty array.
-Before constructing the JSON, internally scan the entire TEXT for every protein, amino-acid residue/range, motif, and mutation token. Use that internal list to ensure you decision every explicit mention is evaluated. Never output the intermediate list.
+Before constructing the JSON, internally scan the entire TEXT for every protein, amino-acid residue/range, motif, mutation token, AND structural domain/region. Use that internal list to ensure every explicit mention is evaluated. Never output the intermediate list.
 
 SYSTEM / INSTRUCTION
 You are a biomedical text-mining specialist. Extract Sequence Features (SFs) from scientific text about viruses.
 
 DEFINITIONS
 A Sequence Feature (SF) is any amino-acid feature with biological significance:
-• regions/domains with coordinates (e.g., “Region 1 (1–80 aa) binds RNA”)
-• discontinuous sites (e.g., “His57–Asp81–Ser139 catalytic triad”)
-• mutations/variants (e.g., “A226V increases vector transmission”)
-• motifs (e.g., “ATLG” motif), PTMs (e.g., palmitoylation 417–419)
-• interaction interfaces (e.g., “Tyr47 (E3) – Tyr48 (E2)”)
+• **STRUCTURAL REGIONS/DOMAINS** with coordinates (e.g., "amino acids 1-73 form the RNA-binding domain", "residues 85-207 constitute the effector domain", "C-terminal tail (178-207 aa)")
+• **FUNCTIONAL DOMAINS** (e.g., "catalytic domain 50-150", "transmembrane region 200-220")
+• **LINKER REGIONS** (e.g., "flexible linker 74-84 aa")
+• **DISORDERED REGIONS** (e.g., "disordered tail residues 178-207")
+• discontinuous sites (e.g., "His57–Asp81–Ser139 catalytic triad")
+• **mutations/variants** (e.g., "A226V increases vector transmission")
+• motifs (e.g., "ATLG" motif), PTMs (e.g., palmitoylation 417-419)
+• interaction interfaces (e.g., "Tyr47 (E3) – Tyr48 (E2)")
 • signals (NLS/NES/cleavage sites) tied to function/phenotype
+
+**CRITICAL**: Extract ALL structural regions even if they have NO mutation or variant. A domain description with coordinates IS a sequence feature.
 
 OUTPUT RULES (format-lock)
 • Respond ONLY with a valid JSON array that passes json.loads().
 • No prose, no markdown, no trailing commas, no comments.
-• One JSON object per feature (do not merge multiple features from one sentence).
+• One JSON object per feature (regions can be split if they have different functions).
 • Use residue numbering as reported (do not renumber).
 • Keep evidence as a short quote (≤30 words) from the text segment.
+• **For structural regions**: set type="region" or "domain", populate residue_positions with the range(s).
 
 SCHEMA
 Each array element must follow exactly:
@@ -43,8 +49,8 @@ Each array element must follow exactly:
   "virus": "Chikungunya virus",
   "protein": "<protein name or complex>",
   "feature": {
-    "name_or_label": "<e.g., Region 1 | A226V | catalytic triad | NLS>",
-    "type": "<mutation_effect | motif | region | domain | active_site | binding_site | interaction_site | modification | signal | other>",
+    "name_or_label": "<e.g., RNA-binding domain | Region 1 | A226V | catalytic triad | NLS | linker region | C-terminal tail>",
+    "type": "<mutation_effect | motif | region | domain | active_site | binding_site | interaction_site | modification | signal | linker | disordered_region | other>",
     "continuity": "<continuous | discontinuous | point | unknown>",
     "residue_positions": [{"start": <int>, "end": <int>}],
     "specific_residues": [{"position": <int>, "aa": "<1-letter code or 'A→V'>"}],
@@ -111,17 +117,107 @@ FEW-SHOT EXAMPLES (keep these)
     "interactions": {"partner_protein": "Capsid C-terminus", "interaction_type": "binding", "context": "auto-inactivation via Trp"},
     "evidence_snippet": "His139, Asp161, and Ser213 form the catalytic triad; the protease cleaves itself in cis.",
     "confidence": { "score_0_to_1": 0.9, "rationale": "Clear residues and function." }
+  },
+  {
+    "virus": "Chikungunya virus",
+    "protein": "nsP3",
+    "feature": {
+      "name_or_label": "RNA-binding domain",
+      "type": "domain",
+      "continuity": "continuous",
+      "residue_positions": [{"start": 1, "end": 73}],
+      "specific_residues": [],
+      "variants": [],
+      "motif_pattern": null
+    },
+    "effect_or_function": {
+      "description": "Double-stranded RNA-binding domain responsible for viral RNA recognition.",
+      "category": "binding_affinity",
+      "direction": "none",
+      "evidence_level": "experimental"
+    },
+    "interactions": {"partner_protein": "viral RNA", "interaction_type": "binding", "context": "dsRNA recognition"},
+    "evidence_snippet": "The first 73 amino acids constitute the double-stranded RNA-binding domain.",
+    "confidence": { "score_0_to_1": 0.85, "rationale": "Clear boundaries and function." }
+  },
+  {
+    "virus": "Chikungunya virus",
+    "protein": "nsP3",
+    "feature": {
+      "name_or_label": "Effector domain",
+      "type": "domain",
+      "continuity": "continuous",
+      "residue_positions": [{"start": 85, "end": 207}],
+      "specific_residues": [],
+      "variants": [],
+      "motif_pattern": null
+    },
+    "effect_or_function": {
+      "description": "Effector domain (ED) responsible for downstream signaling and interactions.",
+      "category": "structural",
+      "direction": "none",
+      "evidence_level": "experimental"
+    },
+    "interactions": {"partner_protein": null, "interaction_type": null, "context": null},
+    "evidence_snippet": "the last 85–207 amino acids constitute the ED.",
+    "confidence": { "score_0_to_1": 0.85, "rationale": "Clear boundaries and structural role." }
+  },
+  {
+    "virus": "Chikungunya virus",
+    "protein": "nsP3",
+    "feature": {
+      "name_or_label": "Flexible linker region",
+      "type": "linker",
+      "continuity": "continuous",
+      "residue_positions": [{"start": 74, "end": 84}],
+      "specific_residues": [],
+      "variants": [],
+      "motif_pattern": null
+    },
+    "effect_or_function": {
+      "description": "Flexible linker connecting RNA-binding and effector domains.",
+      "category": "structural",
+      "direction": "none",
+      "evidence_level": "inferred"
+    },
+    "interactions": {"partner_protein": null, "interaction_type": null, "context": null},
+    "evidence_snippet": "The two domains are connected by a flexible linker region (LR).",
+    "confidence": { "score_0_to_1": 0.75, "rationale": "Clear structural role but approximate range." }
+  },
+  {
+    "virus": "Chikungunya virus",
+    "protein": "nsP3",
+    "feature": {
+      "name_or_label": "C-terminal disordered tail",
+      "type": "disordered_region",
+      "continuity": "continuous",
+      "residue_positions": [{"start": 178, "end": 207}],
+      "specific_residues": [],
+      "variants": [],
+      "motif_pattern": null
+    },
+    "effect_or_function": {
+      "description": "Intrinsically disordered C-terminal tail, likely involved in protein-protein interactions.",
+      "category": "structural",
+      "direction": "none",
+      "evidence_level": "inferred"
+    },
+    "interactions": {"partner_protein": null, "interaction_type": null, "context": null},
+    "evidence_snippet": "The last 30 residues form the C-terminal disordered tail.",
+    "confidence": { "score_0_to_1": 0.8, "rationale": "Clear structural annotation with coordinates." }
   }
 ]
 
 INSTRUCTIONS
+• **CRITICAL**: Extract ALL structural domains, regions, linkers, and tails WITH their coordinates, even if no mutation is mentioned.
 • If multiple features appear in one sentence, output multiple JSON objects (one per feature).
-• If ranges are textual (e.g., “~244–263 aa”), capture integers only (244–263).
-• If only qualitative phrases (e.g., “N-terminus important”) with no coordinates/residues → skip.
+• If ranges are textual (e.g., "~244–263 aa"), capture integers only (244–263).
+• For regions spanning the sentence (e.g., "1-73 aa"), calculate the range if "last X residues" is mentioned.
+• If only qualitative phrases (e.g., "N-terminus important") with no coordinates → skip.
 • Prefer experimental evidence; if unclear, set evidence_level = "inferred" or "computational".
 • Set motif_pattern for sequence motifs (e.g., "HExxH", "ATLG"); else null.
 • When interactions between proteins are described, populate the interactions block; otherwise set each field to null.
-• Ensure every protein or mutation identified in your preparatory scan is either extracted as a feature or explicitly discarded for lacking residue-level detail (in which case do not invent a feature).
+• Ensure every protein, mutation, domain, AND structural region identified in your preparatory scan is either extracted as a feature or explicitly discarded for lacking residue-level detail.
 
 TEXT
 {TEXT}
