@@ -1,4 +1,4 @@
-# Streamlit UI - Optimized version
+# Enhanced app.py - Add to your existing code
 from __future__ import annotations
 
 import os, json, io, zipfile
@@ -12,6 +12,9 @@ from services.pubmed import (
     esearch_reviews, esummary, parse_pubdate_interval, overlaps, to_pdat
 )
 from pipeline.batch_analyze import fetch_all_fulltexts, analyze_texts, flatten_to_rows
+
+# Import prompts for editing
+from llm.prompts import PROMPTS
 
 
 def _persist(key, value):
@@ -44,15 +47,123 @@ def main():
     st.title("🧪 PubMed Review Miner")
     st.caption("Search review articles, fetch PMC full text, run your LLM extractor, and download findings.")
 
+    # ===== NEW: Model & API Key Configuration Section =====
     with st.sidebar:
-        st.header("LLM Settings")
+        st.header("🤖 LLM Configuration")
+        
+        # Model selection
+        model_choice = st.selectbox(
+            "Select LLM Model",
+            ["Gemini (Google)", "GPT-4o (OpenAI)", "Claude (Anthropic)", "Llama (Groq)"],
+            index=0,
+            help="Choose which LLM to use for extraction"
+        )
+        
+        # API Key input based on selection
+        api_key_env_var = None
+        if "Gemini" in model_choice:
+            api_key = st.text_input(
+                "Gemini API Key",
+                value=os.getenv("GEMINI_API_KEY", ""),
+                type="password",
+                help="Get from: https://ai.google.dev/"
+            )
+            api_key_env_var = "GEMINI_API_KEY"
+            model_name = st.text_input("Model Name", value="gemini-2.0-flash-exp")
+            
+        elif "GPT-4o" in model_choice:
+            api_key = st.text_input(
+                "OpenAI API Key",
+                value=os.getenv("OPENAI_API_KEY", ""),
+                type="password",
+                help="Get from: https://platform.openai.com/api-keys"
+            )
+            api_key_env_var = "OPENAI_API_KEY"
+            model_name = st.text_input("Model Name", value="gpt-4o-2024-11-20")
+            
+        elif "Claude" in model_choice:
+            api_key = st.text_input(
+                "Anthropic API Key",
+                value=os.getenv("ANTHROPIC_API_KEY", ""),
+                type="password",
+                help="Get from: https://console.anthropic.com/"
+            )
+            api_key_env_var = "ANTHROPIC_API_KEY"
+            model_name = st.text_input("Model Name", value="claude-sonnet-4-20250514")
+            
+        else:  # Llama (Groq)
+            api_key = st.text_input(
+                "Groq API Key",
+                value=os.getenv("GROQ_API_KEY", ""),
+                type="password",
+                help="Get from: https://console.groq.com/keys"
+            )
+            api_key_env_var = "GROQ_API_KEY"
+            model_name = st.text_input("Model Name", value="llama-3.3-70b-versatile")
+        
+        # Update environment variable
+        if api_key:
+            os.environ[api_key_env_var] = api_key
+        
+        st.divider()
+        
+        # Extraction parameters
+        st.header("⚙️ Extraction Settings")
         chunk_chars = st.slider("Max chars per chunk", 8000, 24000, 16000, 1000)
         overlap_chars = st.slider("Overlap per chunk", 200, 1500, 500, 50)
         delay_ms = st.slider("Delay between chunk calls (ms)", 0, 1500, 400, 50)
         min_conf = st.slider("Min confidence", 0.0, 1.0, 0.6, 0.05)
+        
         st.divider()
-        st.caption("Tip: set NCBI_API_KEY and GROQ_API_KEY (or GEMINI_API_KEY) in .env for reliability.")
+        st.caption("💡 Tip: Test with 1-2 papers first to verify API keys work")
 
+    # ===== NEW: Prompt Editor Section =====
+    with st.expander("📝 **Advanced: Edit Extraction Prompt**", expanded=False):
+        st.markdown("""
+        **Expert users only!** Modify the system prompt used for extraction.
+        Changes affect how mutations and features are identified.
+        """)
+        
+        # Load current prompt
+        current_prompt = PROMPTS.analyst_prompt
+        
+        # Tabs for different prompt sections
+        tab1, tab2, tab3 = st.tabs(["Main Prompt", "Instructions", "Preview"])
+        
+        with tab1:
+            edited_prompt = st.text_area(
+                "Analyst Prompt (used for extraction)",
+                value=current_prompt,
+                height=400,
+                help="This prompt guides the LLM's extraction. Use {TEXT} placeholder."
+            )
+            
+            if st.button("💾 Save Prompt Changes"):
+                PROMPTS.analyst_prompt = edited_prompt
+                st.success("✅ Prompt updated! Will be used for next extraction.")
+        
+        with tab2:
+            st.markdown("""
+            ### Prompt Guidelines:
+            - **{TEXT}** placeholder is required - gets replaced with paper content
+            - Define clear JSON schema for consistent outputs
+            - Include few-shot examples for better accuracy
+            - Specify fields explicitly (virus, protein, mutation, effect, etc.)
+            - Request evidence quotes for validation
+            """)
+            
+        with tab3:
+            st.code(edited_prompt[:1000] + "\n\n... (truncated)" if len(edited_prompt) > 1000 else edited_prompt, language="text")
+        
+        # Reset button
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("🔄 Reset to Default"):
+                from llm.prompts import AnalystPrompts
+                PROMPTS.analyst_prompt = AnalystPrompts().analyst_prompt
+                st.rerun()
+
+    # ===== Search Section (unchanged) =====
     st.subheader("1) Enter your PubMed query (reviews only)")
     st.write("Paste a PubMed query (we'll restrict to **Review** articles automatically).")
     query = st.text_area("Query", height=100, placeholder='e.g., dengue[MeSH Terms] AND mutation[Text Word]')
@@ -107,6 +218,7 @@ def main():
                 st.session_state["selected_pmids"] = []
                 st.success(f"Found {len(df_hits)} results. See 'Results' below to select papers.")
 
+    # ===== Results display (unchanged) =====
     if st.session_state.get("hits_df"):
         st.markdown("#### Results")
         df_hits = pd.DataFrame(st.session_state["hits_df"])
@@ -145,6 +257,7 @@ def main():
                 mime="text/plain"
             )
 
+    # ===== Extraction section (modified to pass model info) =====
     st.subheader("3) Run extraction")
     colA, colB, colC = st.columns([1, 1, 1])
     with colA:
@@ -157,7 +270,7 @@ def main():
         run_all = st.button("🚀 Fetch PMC & Run LLM", 
                            disabled=(not override_all and len(st.session_state.get("selected_pmids", [])) == 0))
 
-    if st.button("🔁 Reset"):
+    if st.button("🗑️ Reset"):
         for k in ["hits_df", "hits_pmids", "batch_papers", "batch_results", "llm_log", 
                   "selected_pmids", "select_all_hits", "pmid_multiselect"]:
             if k in st.session_state:
@@ -177,8 +290,12 @@ def main():
             st.session_state["batch_results"] = {}
             st.session_state["llm_log"] = []
         
-        if not os.getenv("GROQ_API_KEY") and not os.getenv("GEMINI_API_KEY"):
-            st.info("Note: Neither GROQ_API_KEY nor GEMINI_API_KEY is set—set one in .env for best reliability.")
+        # Validate API key
+        if not api_key:
+            st.error(f"⚠️ Please enter your {model_choice} API key in the sidebar!")
+            st.stop()
+        
+        st.info(f"🤖 Using **{model_choice}** (model: `{model_name}`)")
         
         with st.spinner(f"Fetching PMC full texts for {len(pmids)} PMIDs…"):
             papers = fetch_all_fulltexts(pmids, delay_ms=150)
@@ -215,7 +332,7 @@ def main():
                 pmcid = info.get("pmcid") or ""
                 text = (info.get("text") or info.get("fulltext") or info.get("content") or "")
                 
-                with st.expander(f"{pmid} — {title[:100]}"):
+                with st.expander(f"{pmid} – {title[:100]}"):
                     if pmcid:
                         st.markdown(f"**PMCID:** {pmcid}  |  [Open PMC](https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/)")
                     else:
@@ -261,7 +378,7 @@ def main():
             mime="application/zip"
         )
 
-        # LLM extraction phase
+        # ===== LLM extraction phase (MODIFIED) =====
         papers = st.session_state.get("batch_papers", {})
         ok_pmids_this_run = [pid for pid, info in papers.items() if info.get("status") == "ok"]
         
@@ -277,11 +394,18 @@ def main():
         st.markdown("#### Findings")
         table_box = st.empty()
         
+        # Pass model selection to analyze_texts
+        llm_meta = {
+            "model_choice": model_choice,
+            "model_name": model_name,
+            "api_key": api_key,
+        }
+        
         total = len(ok_pmids_this_run)
         for i, pmid in enumerate(ok_pmids_this_run, start=1):
             title = papers[pmid].get("title") or ""
             pmcid = papers[pmid].get("pmcid") or ""
-            log_line = f"[{i}/{total}] Analyzing PMID {pmid} ({pmcid}) — {title[:80]}"
+            log_line = f"[{i}/{total}] Analyzing PMID {pmid} ({pmcid}) – {title[:80]}"
             llm_log.append(log_line)
             _persist("llm_log", llm_log)
             log_box.code("\n".join(llm_log[-20:]), language="text")
@@ -294,6 +418,7 @@ def main():
                     delay_ms=delay_ms, 
                     min_confidence=min_conf, 
                     require_mut_quote=True,
+                    llm_meta=llm_meta,  # NEW: pass model config
                 )
                 batch_results.update(single_dict)
                 _persist("batch_results", batch_results)

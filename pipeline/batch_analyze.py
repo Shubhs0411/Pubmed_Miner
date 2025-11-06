@@ -8,6 +8,7 @@ from typing import Dict, List, Set, Tuple
 
 import pandas as pd
 
+from llm.unified import run_on_paper, clean_and_ground
 from services.pmc import get_pmc_fulltext_with_meta, get_last_fetch_source
 from llm.gemini import run_on_paper, clean_and_ground
 
