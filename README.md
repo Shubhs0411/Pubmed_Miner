@@ -123,11 +123,38 @@ pip install -r requirements.txt
 
 ### Step 5: Configure API keys
 
-#### Required: Get a Gemini API Key
+#### Required: Get an LLM API Key (choose one)
+**Option 1: Gemini (Recommended)**
 1. Go to [Google AI Studio](https://aistudio.google.com/)
 2. Sign in with your Google account
 3. Click "Get API key" → "Create API key"
 4. Copy the generated key
+
+**Option 2: Groq**
+1. Go to [Groq Console](https://console.groq.com/keys)
+2. Sign in or create an account
+3. Create a new API key
+4. Copy the generated key
+
+**Option 3: OpenAI**
+1. Go to [OpenAI API Keys](https://platform.openai.com/api-keys)
+2. Sign in with your OpenAI account
+3. Click "Create new secret key"
+4. Copy the generated key
+
+**Option 4: Anthropic (Claude)**
+1. Go to [Anthropic Console](https://console.anthropic.com/settings/keys)
+2. Sign in with your Anthropic account
+3. Create a new API key
+4. Copy the generated key
+
+**Option 5: Hugging Face (Any Model)**
+1. Go to [Hugging Face Settings](https://huggingface.co/settings/tokens)
+2. Sign in with your Hugging Face account
+3. Create a new token (read access is enough)
+4. Copy the token
+5. **Important**: Many popular models require gated access - visit the model page and accept terms
+6. Note: Free Inference API has limitations; consider Groq/OpenAI/Anthropic for production use
 
 #### Required: Get an NCBI API Key
 1. Go to [NCBI API Key Registration](https://www.ncbi.nlm.nih.gov/account/settings/)
@@ -145,10 +172,14 @@ pip install -r requirements.txt
 Create a **.env** file in the project root:
 
 ```dotenv
-# Required: Choose ONE LLM backend
+# Required: Choose ONE LLM backend (or provide multiple and choose in UI)
 GEMINI_API_KEY="your_gemini_api_key_here"
 # OR
-GROQ_API_KEY="your_groq_api_key_here"
+# GROQ_API_KEY="your_groq_api_key_here"
+# OR
+# OPENAI_API_KEY="your_openai_api_key_here"
+# OR
+# ANTHROPIC_API_KEY="your_anthropic_api_key_here"
 
 # Required: NCBI API key for reliable operation
 NCBI_API_KEY="your_ncbi_api_key_here"
@@ -367,6 +398,12 @@ This will search for Dengue-related protein review literature mentioning an acti
 **Some PMIDs show no PMC text**
 - The paper may be embargoed or not deposited in PMC
 - The app will still process available items
+
+**Hugging Face 410 Gone errors**
+- Many models require gated access: Visit the model page on Hugging Face and accept terms
+- Some models aren't available on free Inference API: Try publicly available models like `google/flan-t5-large`
+- For better results: Consider using Groq, OpenAI, or Anthropic instead (more reliable for production)
+- Check model availability: Visit https://huggingface.co/models and filter by "Inference API"
 
 **Import errors or missing modules**
 - Ensure you're using Python 3.11+

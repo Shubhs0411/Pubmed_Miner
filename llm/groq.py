@@ -1,7 +1,9 @@
+# llm/groq.py - Groq/Llama API-specific implementation
+# Uses shared utilities from llm.utils
+
 from __future__ import annotations
 
 import os
-import json
 import time
 from typing import List, Dict, Any, Optional
 
@@ -13,24 +15,56 @@ try:
 except Exception:
     pass
 
+# Import ALL shared utilities
+from llm import utils
+
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_MODEL = "llama-3.1-8b-instant"
+DEFAULT_MODEL = "llama-3.3-70b-versatile"
 
-def _require_key() -> str:
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
+
+def _require_key(api_key: Optional[str] = None) -> str:
+    """Get API key from parameter or environment."""
+    if api_key:
+        return api_key
+    key = os.getenv("GROQ_API_KEY")
+    if not key:
         raise RuntimeError("GROQ_API_KEY not set. Export it or put it in a .env file.")
-    return api_key
+    return key
 
-def _post_chat(payload: Dict[str, Any]) -> Dict[str, Any]:
+
+def _post_chat(payload: Dict[str, Any], api_key: str) -> Dict[str, Any]:
+    """Post to Groq API with retries and rate limiting."""
+    # Validate API key before making request
+    if not api_key or not api_key.strip():
+        raise RuntimeError(
+            f"GROQ_API_KEY is empty or invalid. "
+            f"Received key (first 10 chars): {repr(api_key[:10]) if api_key else 'None'}"
+        )
+    
+    api_key = api_key.strip()
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {_require_key()}",
+        "Authorization": f"Bearer {api_key}",
     }
-    max_retries = 6
-    backoff = 1.0
+    max_retries = 3  # Reduced from 6 to 3 for faster failure
+    backoff = 0.5  # Reduced initial backoff from 1.0 to 0.5
+    timeout = 30  # Reduced from 90 to 30 seconds for faster timeout
     for attempt in range(1, max_retries + 1):
-        resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=90)
+        resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=timeout)
+        if resp.status_code == 401:
+            # 401 Unauthorized - don't retry, provide helpful error
+            error_msg = f"Groq API 401 Unauthorized. "
+            try:
+                error_body = resp.json()
+                if "error" in error_body:
+                    error_msg += f"Error: {error_body.get('error', {}).get('message', 'Invalid API key')}. "
+            except Exception:
+                error_msg += "Invalid or missing API key. "
+            error_msg += (
+                f"Please check your API key at https://console.groq.com/keys. "
+                f"API key (first 10 chars): {repr(api_key[:10])}"
+            )
+            raise RuntimeError(error_msg)
         if resp.status_code == 404 and "unknown_url" in (resp.text or ""):
             raise RuntimeError(
                 "Groq API 404 unknown_url. Use POST https://api.groq.com/openai/v1/chat/completions"
@@ -59,146 +93,14 @@ def _post_chat(payload: Dict[str, Any]) -> Dict[str, Any]:
         return resp.json()
     raise RuntimeError("Exceeded retry attempts contacting Groq API.")
 
-def _safe_json_loads(raw: str) -> Optional[dict]:
-    try:
-        return json.loads(raw)
-    except Exception:
-        start = raw.find("{"); end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            try:
-                return json.loads(raw[start:end + 1])
-            except Exception:
-                return None
-    return None
-
-def _unique_strs(seq: List[str]) -> List[str]:
-    out, seen = [], set()
-    for s in seq:
-        if not isinstance(s, str): continue
-        t = s.strip()
-        if t and t not in seen:
-            seen.add(t); out.append(t)
-    return out
-
-def _normalize_ws(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-    return " ".join(text.split())
-
-def _chunk_text(text: str, max_chars: int = 12000, overlap: int = 500) -> List[str]:
-    text = _normalize_ws(text)
-    n = len(text)
-    if n <= max_chars:
-        return [text]
-    chunks = []
-    start = 0
-    while start < n:
-        end = min(n, start + max_chars)
-        chunks.append(text[start:end])
-        if end >= n:
-            break
-        start = max(0, end - overlap)
-    return chunks
-
-def _find_all_ci(hay: str, needle: str) -> List[int]:
-    if not hay or not needle:
-        return []
-    h = hay.lower(); n = needle.lower()
-    out = []
-    i = 0
-    while True:
-        j = h.find(n, i)
-        if j == -1:
-            break
-        out.append(j)
-        i = j + max(1, len(n))
-    return out
-
-def _windows_for_mutation(full_text: str,
-                          mutation: str,
-                          *,
-                          left: int = 900,
-                          right: int = 900,
-                          max_windows: int = 6,
-                          max_total_chars: int = 12000) -> str:
-    t = _normalize_ws(full_text)
-    idxs = _find_all_ci(t, mutation)
-    if not idxs:
-        return t[:max_total_chars]
-    pieces: List[str] = []
-    used = 0
-    for i in idxs[:max_windows]:
-        start = max(0, i - left)
-        end = min(len(t), i + len(mutation) + right)
-        seg = t[start:end]
-        if used + len(seg) + 2 > max_total_chars:
-            break
-        pieces.append(seg)
-        used += len(seg) + 2
-    return ("\n\n...\n\n".join(pieces))[:max_total_chars]
-
-def _pass1_messages(paper_text: str) -> List[Dict[str, str]]:
-    sys = (
-        "You extract mutation tokens from biomedical papers.\n"
-        "Return ONLY normalized mutation/segment tokens that occur in the text, no commentary.\n"
-        "Normalize to concise forms such as N501Y, D125A, K70*, del69-70, aa1396-1435, p.Asp125Ala, insA/insAla.\n"
-        "Output STRICT JSON only:\n"
-        "{ \"mutations\": [\"<token1>\", \"<token2>\", ...] }"
-    )
-    usr = (
-        "Extract all mutation/segment tokens present in the PAPER_TEXT. "
-        "Keep unique items, preserve canonical form, and ignore background organisms unless the token is explicitly stated.\n\n"
-        "PAPER_TEXT:\n" + paper_text
-    )
-    return [{"role": "system", "content": sys}, {"role": "user", "content": usr}]
-
-_ALLOWED_CATEGORIES = {
-    "RNA_synthesis", "virion_assembly", "binding", "replication",
-    "infectivity", "virulence", "immune_evasion", "drug_interaction",
-    "temperature_sensitivity", "activity_change", "modification", "other"
-}
-
-def _pass2_messages(local_context: str,
-                    mutation: str,
-                    pmid: Optional[str],
-                    pmcid: Optional[str]) -> List[Dict[str, str]]:
-    sys = (
-        "You attribute a given mutation token to virus, strain/lineage, protein, and effect using ONLY the provided context from this paper.\n"
-        "Be concise and specific. Provide 1–2 short quotes (≤ ~20 words each) that appear verbatim, and include "
-        "the exact mutation token in at least one quote. Use the controlled set of effect categories."
-    )
-    usr = (
-        "Given the LOCAL_CONTEXT (excerpts from the paper) and the target MUTATION, extract one structured item.\n"
-        "STRICT JSON only:\n"
-        "{\n"
-        "  \"paper\": {\"pmid\": " + json.dumps(pmid) + ", \"pmcid\": " + json.dumps(pmcid) + ", \"title\": null,\n"
-        "             \"virus_candidates\": [], \"protein_candidates\": []},\n"
-        "  \"sequence_features\": [\n"
-        "    {\n"
-        "      \"virus\": \"<organism or null>\",\n"
-        "      \"source_strain\": \"<serotype/lineage/strain or null>\",\n"
-        "      \"protein\": \"<protein or gene symbol>\",\n"
-        "      \"mutation\": " + json.dumps(mutation) + ",\n"
-        "      \"position\": \"<integer or null>\",\n"
-        "      \"effect_category\": \"<RNA_synthesis|virion_assembly|binding|replication|infectivity|virulence|immune_evasion|drug_interaction|temperature_sensitivity|activity_change|modification|other>\",\n"
-        "      \"effect_summary\": \"<1-2 sentences specific to this paper>\",\n"
-        "      \"mechanism_hypothesis\": \"<brief or null>\",\n"
-        "      \"experiment_context\": {\"system\": \"<cell/animal/in vitro/in silico>\", \"assay\": \"<method>\", \"temperature\": \"<value or null>\"},\n"
-        "      \"evidence_quotes\": [\"<short quote 1>\", \"<short quote 2>\"],\n"
-        "      \"cross_refs\": [{\"pmid\": null, \"note\": null}]\n"
-        "    }\n"
-        "  ]\n"
-        "}\n\n"
-        "If you cannot support the mutation with a grounded quote in the LOCAL_CONTEXT, return an empty sequence_features list.\n\n"
-        "MUTATION: " + mutation + "\n\n"
-        "LOCAL_CONTEXT:\n" + local_context
-    )
-    return [{"role": "system", "content": sys}, {"role": "user", "content": usr}]
 
 def _payload_size(messages: List[Dict[str, str]]) -> int:
+    """Calculate total payload size."""
     return sum(len(m.get("content", "")) for m in messages)
 
+
 def _shrink_user_content(messages: List[Dict[str, str]], keep_bytes: int) -> List[Dict[str, str]]:
+    """Shrink user content to fit within byte limit."""
     if not messages:
         return messages
     total = _payload_size(messages)
@@ -216,33 +118,39 @@ def _shrink_user_content(messages: List[Dict[str, str]], keep_bytes: int) -> Lis
             return messages
     return messages
 
-def _chat_retry_shrinking(messages: List[Dict[str, str]],
-                          model: str,
-                          temperature: float,
-                          max_tokens: int,
-                          *,
-                          shrink_targets: List[int] = [20000, 14000, 10000, 7000, 5000]) -> str:
+
+def _groq_complete(prompt: str, api_key: str, model_name: str, max_output_tokens: int = 8192) -> str:
+    """Groq API completion call with payload size handling."""
+    # Use ONLY the prompt from pass2_prompt (which already contains all system instructions)
+    # This ensures consistency with Gemini and all other models
+    messages = [
+        {"role": "user", "content": prompt}
+    ]
+    
     payload = {
-        "model": model,
+        "model": model_name,
         "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
+        "temperature": 0.0,
+        "max_tokens": max_output_tokens,
     }
+    
     try:
-        data = _post_chat(payload)
+        data = _post_chat(payload, api_key)
         return data["choices"][0]["message"]["content"]
     except requests.HTTPError as e:
         if getattr(e, "response", None) is not None and e.response.status_code == 413:
+            # Try shrinking payload
+            shrink_targets = [20000, 14000, 10000, 7000, 5000]
             for budget in shrink_targets:
                 shrunk = _shrink_user_content(messages, keep_bytes=budget)
                 payload = {
-                    "model": model,
+                    "model": model_name,
                     "messages": shrunk,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
+                    "temperature": 0.0,
+                    "max_tokens": max_output_tokens,
                 }
                 try:
-                    data = _post_chat(payload)
+                    data = _post_chat(payload, api_key)
                     return data["choices"][0]["message"]["content"]
                 except requests.HTTPError as e2:
                     if getattr(e2, "response", None) is not None and e2.response.status_code == 413:
@@ -251,118 +159,224 @@ def _chat_retry_shrinking(messages: List[Dict[str, str]],
             raise
         raise
 
+
+def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Single-call, multi-chunk extraction using the analyst prompt.
+    Uses shared utilities from llm.utils for all processing logic.
+    """
+    meta = meta or {}
+    
+    # Handle API key from meta (frontend) or env (backup)
+    api_key_from_meta = meta.get("api_key")
+    api_key_from_env = os.getenv("GROQ_API_KEY")
+    api_key = api_key_from_meta or api_key_from_env
+    
+    if not api_key or not api_key.strip():
+        raise RuntimeError(
+            f"GROQ_API_KEY not set. Provide it in meta['api_key'] (from frontend) or set GROQ_API_KEY environment variable. "
+            f"Received: meta['api_key']={repr(api_key_from_meta)}, env={repr(api_key_from_env)}"
+        )
+    
+    api_key = api_key.strip()
+    model_name = meta.get("model_name", DEFAULT_MODEL)
+    delay_ms = int(meta.get("delay_ms") or 0)
+    
+    pmid = meta.get("pmid")
+    pmcid = meta.get("pmcid")
+    text_norm = utils.normalize_ws(paper_text or "")
+
+    scan_candidates = utils.scan_text_candidates(text_norm)
+
+    # Chunk parameters
+    chunk_chars = int(meta.get("chunk_chars") or 100_000)
+    overlap_chars = int(meta.get("overlap_chars") or 2_000)
+    max_chunks = int(meta.get("max_chunks") or 4)
+
+    chunks = list(utils.chunk_text(text_norm, max_chars=chunk_chars, overlap=overlap_chars))
+    chunks = chunks[:max_chunks] if chunks else [text_norm]
+
+    all_features: List[Any] = []
+    
+    # Process each chunk
+    for idx, ch in enumerate(chunks, 1):
+        prompt2 = utils.pass2_prompt(
+            ch, target_token="", pmid=pmid, pmcid=pmcid, 
+            token_type="paper", scan_candidates=scan_candidates
+        )
+        
+        try:
+            raw2 = _groq_complete(prompt2, api_key, model_name, max_output_tokens=8192)
+            j2 = utils.safe_json_value(raw2)
+
+            if isinstance(j2, dict) and isinstance(j2.get("sequence_features"), list):
+                feats = j2["sequence_features"]
+            elif isinstance(j2, list):
+                feats = j2
+            else:
+                feats = []
+
+            print(f"[DEBUG] chunk {idx}/{len(chunks)} feature_count:", len(feats))
+            
+            normalized: List[Any] = []
+            for feat in feats:
+                if isinstance(feat, dict):
+                    norm = utils.normalize_prompt_feature(feat)
+                    if norm:
+                        normalized.append(norm)
+            
+            all_features.extend(normalized)
+        except requests.HTTPError as e:
+            # Handle HTTP errors (including 401)
+            if e.response and e.response.status_code == 401:
+                error_msg = (
+                    f"Groq API 401 Unauthorized. Invalid or missing API key. "
+                    f"Please check your API key at https://console.groq.com/keys. "
+                    f"API key provided: {'Yes' if api_key else 'No'} "
+                    f"(first 10 chars: {repr(api_key[:10]) if api_key else 'N/A'})"
+                )
+                raise RuntimeError(error_msg) from e
+            print(f"[Groq] HTTP Error on chunk {idx}: {e}")
+            continue
+        except RuntimeError as e:
+            # Don't continue on auth errors - fail fast
+            error_msg = str(e)
+            if "401" in error_msg or "Unauthorized" in error_msg or "API key" in error_msg:
+                raise RuntimeError(f"[Groq] Authentication failed on chunk {idx}: {error_msg}") from e
+            print(f"[Groq] Error on chunk {idx}: {e}")
+            continue
+        except Exception as e:
+            print(f"[Groq] Error on chunk {idx}: {e}")
+            import traceback
+            print(f"[Groq] Traceback: {traceback.format_exc()}")
+            continue
+        
+        if delay_ms:
+            time.sleep(delay_ms / 1000.0)
+
+    # Targeted follow-up for missed mutations
+    extracted_tokens = utils.collect_extracted_tokens([f for f in all_features if isinstance(f, dict)])
+    mutation_candidates = scan_candidates.get("mutation_tokens", []) if isinstance(scan_candidates, dict) else []
+    hgvs_candidates = scan_candidates.get("hgvs_tokens", []) if isinstance(scan_candidates, dict) else []
+    
+    followup_tokens: List[str] = []
+    for token in mutation_candidates + hgvs_candidates:
+        if token and token not in extracted_tokens:
+            followup_tokens.append(token)
+    
+    # Deduplicate
+    deduped_follow = []
+    seen_follow: set = set()
+    for token in followup_tokens:
+        if token not in seen_follow:
+            seen_follow.add(token)
+            deduped_follow.append(token)
+    followup_tokens = deduped_follow
+
+    # Process missed mutations
+    for token in followup_tokens[:15]:
+        context = utils.token_context_windows(
+            text_norm, token, left=900, right=900, max_windows=4
+        )
+        hints = {"mutation_tokens": [token]}
+        prompt_focus = utils.pass2_prompt(
+            context, target_token=token, pmid=pmid, pmcid=pmcid, 
+            token_type="mutation", scan_candidates=hints
+        )
+        
+        try:
+            raw_focus = _groq_complete(prompt_focus, api_key, model_name, max_output_tokens=2048)
+            parsed_focus = utils.safe_json_value(raw_focus)
+            
+            focus_feats: List[Dict[str, Any]] = []
+            if isinstance(parsed_focus, dict) and isinstance(parsed_focus.get("sequence_features"), list):
+                focus_feats = parsed_focus["sequence_features"]
+            elif isinstance(parsed_focus, list):
+                focus_feats = parsed_focus
+            
+            normalized_focus: List[Dict[str, Any]] = []
+            for feat in focus_feats:
+                if isinstance(feat, dict):
+                    norm_feat = utils.normalize_prompt_feature(feat)
+                    if norm_feat:
+                        normalized_focus.append(norm_feat)
+            
+            if normalized_focus:
+                all_features.extend(normalized_focus)
+                extracted_tokens.update(utils.collect_extracted_tokens(normalized_focus))
+        except Exception as e:
+            print(f"[Groq] Error on followup token {token}: {e}")
+            continue
+        
+        if delay_ms:
+            time.sleep(delay_ms / 1000.0)
+
+    # Deduplicate at JSON-schema level
+    def _k(f):
+        if not isinstance(f, dict):
+            return ("", "", "", "", "")
+        feat = f.get("feature") or {}
+        positions = feat.get("residue_positions") or []
+        pos0 = positions[0] if positions else {}
+        return (
+            (f.get("virus") or "").lower(),
+            (f.get("protein") or "").lower(),
+            (feat.get("name_or_label") or "").lower(),
+            (feat.get("type") or "").lower(),
+            f"{pos0.get('start')}-{pos0.get('end')}",
+        )
+    
+    seen = set()
+    uniq = []
+    for f in all_features:
+        k = _k(f)
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(f)
+
+    raw = {
+        "paper": {
+            "pmid": pmid, 
+            "pmcid": pmcid, 
+            "title": meta.get("title"),
+            "virus_candidates": [], 
+            "protein_candidates": []
+        },
+        "sequence_features": uniq,
+        "scan_candidates": scan_candidates,
+    }
+
+    cleaned = utils.clean_and_ground(
+        raw, text_norm,
+        restrict_to_paper=True,
+        require_mutation_in_quote=False,
+        min_confidence=float(meta.get("min_confidence") or 0.0),
+    )
+    
+    return cleaned
+
+
+# Re-export clean_and_ground from utils for backward compatibility
+clean_and_ground = utils.clean_and_ground
+
+
 def chat_complete(messages: List[Dict[str, str]],
+                  api_key: Optional[str] = None,
                   model: str = DEFAULT_MODEL,
                   temperature: float = 0.2,
                   max_tokens: int = 1024) -> str:
+    """Legacy chat_complete function for backward compatibility."""
+    api_key = _require_key(api_key)
     payload = {
         "model": model,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
-    data = _post_chat(payload)
+    data = _post_chat(payload, api_key)
     return data["choices"][0]["message"]["content"]
 
-def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    meta = meta or {}
-    pmid = meta.get("pmid")
-    pmcid = meta.get("pmcid")
-    delay_ms = int(meta.get("delay_ms") or 0)
-    chunk_chars = int(meta.get("chunk_chars") or 12000)
-    overlap_chars = int(meta.get("overlap_chars") or 500)
-
-    paper_text = _normalize_ws(paper_text)
-
-    mutations: List[str] = []
-    seen = set()
-    for chunk in _chunk_text(paper_text, max_chars=chunk_chars, overlap=overlap_chars):
-        msgs = _pass1_messages(chunk)
-        try:
-            raw1 = _chat_retry_shrinking(msgs, DEFAULT_MODEL, 0.2, 700, shrink_targets=[18000, 12000, 8000, 6000, 4500])
-        except Exception:
-            continue
-        j1 = _safe_json_loads(raw1) or {"mutations": []}
-        for m in j1.get("mutations") or []:
-            if isinstance(m, str):
-                t = m.strip()
-                if t and t not in seen:
-                    seen.add(t); mutations.append(t)
-        if delay_ms:
-            time.sleep(delay_ms / 1000.0)
-
-    seq_feats: List[Dict[str, Any]] = []
-    for m in mutations:
-        local_ctx = _windows_for_mutation(
-            paper_text, m,
-            left=900, right=900, max_windows=6, max_total_chars=min(12000, chunk_chars)
-        )
-        msgs2 = _pass2_messages(local_ctx, m, pmid, pmcid)
-        try:
-            raw2 = _chat_retry_shrinking(msgs2, DEFAULT_MODEL, 0.2, 1200, shrink_targets=[18000, 12000, 9000, 7000, 5000])
-        except Exception:
-            local_ctx = _windows_for_mutation(
-                paper_text, m, left=600, right=600, max_windows=4, max_total_chars=7000
-            )
-            msgs2 = _pass2_messages(local_ctx, m, pmid, pmcid)
-            raw2 = _chat_retry_shrinking(msgs2, DEFAULT_MODEL, 0.2, 900, shrink_targets=[9000, 7000, 5000, 3500])
-
-        j2 = _safe_json_loads(raw2) or {}
-        feats = (j2.get("sequence_features") or []) if isinstance(j2, dict) else []
-        for f in feats:
-            if isinstance(f, dict):
-                seq_feats.append(f)
-        if delay_ms:
-            time.sleep(delay_ms / 1000.0)
-
-    return {
-        "paper": {"pmid": pmid, "pmcid": pmcid, "title": None, "virus_candidates": [], "protein_candidates": []},
-        "sequence_features": seq_feats
-    }
-
-def clean_and_ground(raw: Dict[str, Any],
-                     full_text: str,
-                     *,
-                     restrict_to_paper: bool = True,
-                     require_mutation_in_quote: bool = True,
-                     min_confidence: float = 0.0) -> Dict[str, Any]:
-    paper = (raw or {}).get("paper") or {
-        "pmid": None, "pmcid": None, "title": None, "virus_candidates": [], "protein_candidates": []
-    }
-    feats = (raw or {}).get("sequence_features") or []
-    kept = []
-    norm_text = _normalize_ws(full_text).lower() if isinstance(full_text, str) else ""
-    for f in feats:
-        if not isinstance(f, dict):
-            continue
-        mut = (f.get("mutation") or "").strip()
-        if not mut:
-            continue
-        quotes = [q for q in (f.get("evidence_quotes") or []) if isinstance(q, str) and q.strip()]
-        quote_ok = False
-        if quotes and isinstance(full_text, str):
-            for q in quotes:
-                ql = _normalize_ws(q).lower()
-                if ql in norm_text and (not require_mutation_in_quote or (mut.lower() in ql)):
-                    quote_ok = True
-                    break
-        if not quote_ok:
-            continue
-        cat = (f.get("effect_category") or "").strip()
-        if cat not in _ALLOWED_CATEGORIES:
-            f["effect_category"] = "other"
-        conf = 0.0
-        if quotes: conf += 0.6
-        if isinstance(f.get("position"), int): conf += 0.1
-        ctx = f.get("experiment_context") or {}
-        if any(ctx.get(k) for k in ("system", "assay", "temperature")): conf += 0.1
-        if f.get("effect_category"): conf += 0.1
-        conf = min(conf, 1.0)
-        if conf < float(min_confidence or 0.0):
-            continue
-        f["confidence"] = conf
-        kept.append(f)
-    return {"paper": paper, "sequence_features": kept}
 
 __all__ = [
     "chat_complete",
@@ -371,5 +385,3 @@ __all__ = [
     "DEFAULT_MODEL",
     "GROQ_API_URL",
 ]
-
-

@@ -54,7 +54,7 @@ def main():
         # Model selection
         model_choice = st.selectbox(
             "Select LLM Model",
-            ["Gemini (Google)", "GPT-4o (OpenAI)", "Claude (Anthropic)", "Llama (Groq)"],
+            ["Gemini (Google)", "GPT-4o (OpenAI)", "Claude (Anthropic)", "Llama (Groq)", "Hugging Face (Any Model)"],
             index=0,
             help="Choose which LLM to use for extraction"
         )
@@ -69,7 +69,7 @@ def main():
                 help="Get from: https://ai.google.dev/"
             )
             api_key_env_var = "GEMINI_API_KEY"
-            model_name = st.text_input("Model Name", value="gemini-2.0-flash-exp")
+            model_name = st.text_input("Model Name", value="gemini-2.5-flash-lite")
             
         elif "GPT-4o" in model_choice:
             api_key = st.text_input(
@@ -91,7 +91,7 @@ def main():
             api_key_env_var = "ANTHROPIC_API_KEY"
             model_name = st.text_input("Model Name", value="claude-sonnet-4-20250514")
             
-        else:  # Llama (Groq)
+        elif "Groq" in model_choice or "Llama" in model_choice:  # Llama (Groq)
             api_key = st.text_input(
                 "Groq API Key",
                 value=os.getenv("GROQ_API_KEY", ""),
@@ -100,9 +100,33 @@ def main():
             )
             api_key_env_var = "GROQ_API_KEY"
             model_name = st.text_input("Model Name", value="llama-3.3-70b-versatile")
+            
+        elif "Hugging Face" in model_choice:  # Hugging Face
+            api_key = st.text_input(
+                "Hugging Face API Key",
+                value=os.getenv("HF_API_KEY", "") or os.getenv("HUGGINGFACE_API_KEY", ""),
+                type="password",
+                help="Get from: https://huggingface.co/settings/tokens"
+            )
+            api_key_env_var = "HF_API_KEY"
+            default_model = st.text_input(
+                "Model Name (e.g., gpt2)", 
+                value="gpt2",
+                help="Free tier models: gpt2, distilgpt2, google/flan-t5-base. Note: Most instruction models require gated access or paid tier. For best results, use Groq/OpenAI/Anthropic."
+            )
+            
+            st.warning(
+                "⚠️ **Important**: Hugging Face free Inference API has very limited models available. "
+                "Most instruction-tuned models (Qwen, Phi, Mistral, etc.) require gated access or paid subscriptions. "
+                "For reliable structured JSON extraction, we strongly recommend using Groq, OpenAI, or Anthropic instead.",
+                icon="⚠️"
+            )
+            model_name = default_model
         
-        # Update environment variable
+        # Strip whitespace from API key
         if api_key:
+            api_key = api_key.strip()
+            # Update environment variable (but frontend will take priority in backend)
             os.environ[api_key_env_var] = api_key
         
         st.divider()
@@ -224,7 +248,7 @@ def main():
         df_hits = pd.DataFrame(st.session_state["hits_df"])
         pmid_options = [str(x) for x in st.session_state.get("hits_pmids", [])]
         
-        st.dataframe(df_hits, use_container_width=True)
+        st.dataframe(df_hits, width='stretch')
         st.download_button(
             "⬇️ Download matches (.csv)", 
             data=df_hits.to_csv(index=False).encode("utf-8"), 
@@ -290,7 +314,8 @@ def main():
             st.session_state["batch_results"] = {}
             st.session_state["llm_log"] = []
         
-        # Validate API key
+        # Validate API key (strip whitespace first)
+        api_key = api_key.strip() if api_key else ""
         if not api_key:
             st.error(f"⚠️ Please enter your {model_choice} API key in the sidebar!")
             st.stop()
@@ -307,15 +332,15 @@ def main():
         
         if n_ok:
             with st.expander("Show fetched list", expanded=False):
-                st.dataframe(pd.DataFrame(fetched), use_container_width=True, 
+                st.dataframe(pd.DataFrame(fetched), width='stretch', 
                            height=min(400, 40 + 28 * len(fetched)))
         if n_no:
             with st.expander("Show no-PMC list", expanded=False):
-                st.dataframe(pd.DataFrame(no_pmc), use_container_width=True, 
+                st.dataframe(pd.DataFrame(no_pmc), width='stretch', 
                            height=min(400, 40 + 28 * len(no_pmc)))
         if n_err:
             with st.expander("Show fetch errors", expanded=False):
-                st.dataframe(pd.DataFrame(errors), use_container_width=True, 
+                st.dataframe(pd.DataFrame(errors), width='stretch', 
                            height=min(400, 40 + 28 * len(errors)))
         
         if n_ok == 0:
@@ -394,11 +419,12 @@ def main():
         st.markdown("#### Findings")
         table_box = st.empty()
         
-        # Pass model selection to analyze_texts
+        # Pass model selection to analyze_texts (ensure api_key is passed even if env is set)
+        # Frontend API key takes priority over env var in backend
         llm_meta = {
             "model_choice": model_choice,
             "model_name": model_name,
-            "api_key": api_key,
+            "api_key": api_key,  # This will be used as PRIMARY in backend
         }
         
         total = len(ok_pmids_this_run)
@@ -424,7 +450,7 @@ def main():
                 _persist("batch_results", batch_results)
                 
                 out_df_partial = flatten_to_rows(batch_results)
-                table_box.dataframe(out_df_partial, use_container_width=True)
+                table_box.dataframe(out_df_partial, width='stretch')
             except Exception as e:
                 err_line = f"   ↳ ERROR on PMID {pmid}: {e}"
                 llm_log.append(err_line)
@@ -436,7 +462,7 @@ def main():
         st.success("LLM extraction complete ✅")
         
         out_df = flatten_to_rows(st.session_state.get("batch_results", {}))
-        table_box.dataframe(out_df, use_container_width=True)
+        table_box.dataframe(out_df, width='stretch')
         
         colD, colE = st.columns([1, 1])
         with colD:
