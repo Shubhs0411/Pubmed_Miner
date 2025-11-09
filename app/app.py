@@ -499,10 +499,12 @@ def main():
         
         # Pass model selection to analyze_texts (ensure api_key is passed even if env is set)
         # Frontend API key takes priority over env var in backend
+        # Also pass current prompt (may be edited by user)
         llm_meta = {
             "model_choice": model_choice,
             "model_name": model_name,
             "api_key": api_key,  # This will be used as PRIMARY in backend
+            "analyst_prompt": PROMPTS.analyst_prompt,  # Current prompt (includes user edits)
         }
         
         total = len(ok_pmids_this_run)

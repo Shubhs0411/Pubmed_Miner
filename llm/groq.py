@@ -167,6 +167,13 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
     """
     meta = meta or {}
     
+    # If custom prompt provided from frontend, use it (temporarily override)
+    custom_prompt = meta.get("analyst_prompt")
+    if custom_prompt:
+        from llm.prompts import PROMPTS
+        original_prompt = PROMPTS.analyst_prompt
+        PROMPTS.analyst_prompt = custom_prompt
+    
     # Handle API key from meta (frontend) or env (backup)
     api_key_from_meta = meta.get("api_key")
     api_key_from_env = os.getenv("GROQ_API_KEY")
