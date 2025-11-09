@@ -157,51 +157,66 @@ def main():
         st.divider()
         st.caption("💡 Tip: Test with 1-2 papers first to verify API keys work")
 
-    # ===== NEW: Prompt Editor Section =====
-    with st.expander("📝 **Advanced: Edit Extraction Prompt**", expanded=False):
+    # ===== Prompt Editor Section =====
+    with st.expander("📝 **Edit Extraction Prompt (Bioinformaticians)**", expanded=False):
         st.markdown("""
-        **Expert users only!** Modify the system prompt used for extraction.
-        Changes affect how mutations and features are identified.
+        ### Simple Guide to Editing the Prompt
+        
+        **What you can edit:**
+        - **SYSTEM / INSTRUCTION**: Change the role/identity of the AI (e.g., specialize for different viruses)
+        - **DEFINITIONS**: Add or modify feature types to extract (domains, mutations, motifs, etc.)
+        - **INSTRUCTIONS**: Adjust extraction behavior and guidelines (appears after examples in the full prompt)
+        
+        **What is locked (cannot edit):**
+        - JSON format requirements (ensures app works correctly)
+        - Output rules and schema (prevents breaking changes)
+        - Few-shot examples (maintains consistency)
+        - The `{TEXT}` placeholder (required for paper content)
+        
+        **Tips:**
+        - You can add new feature types in DEFINITIONS (e.g., "• **NEW_FEATURE** (description)")
+        - Modify INSTRUCTIONS to change extraction priorities or behaviors
+        - The full prompt structure is: Header → SYSTEM/DEFINITIONS → Output Rules → Schema → Examples → INSTRUCTIONS → Text
+        - Changes take effect immediately for the next extraction
+        - Use "Reset to Default" if something goes wrong
         """)
         
-        # Load current prompt
-        current_prompt = PROMPTS.analyst_prompt
+        # Load current editable section
+        current_editable = PROMPTS.analyst_prompt_editable
         
-        # Tabs for different prompt sections
-        tab1, tab2, tab3 = st.tabs(["Main Prompt", "Instructions", "Preview"])
+        # Single editor for editable section
+        edited_section = st.text_area(
+            "Editable Prompt Section",
+            value=current_editable,
+            height=400,
+            help="Edit the SYSTEM/INSTRUCTION, DEFINITIONS, and INSTRUCTIONS sections. Other parts are locked for safety."
+        )
         
-        with tab1:
-            edited_prompt = st.text_area(
-                "Analyst Prompt (used for extraction)",
-                value=current_prompt,
-                height=400,
-                help="This prompt guides the LLM's extraction. Use {TEXT} placeholder."
-            )
-            
-            if st.button("💾 Save Prompt Changes"):
-                PROMPTS.analyst_prompt = edited_prompt
-                st.success("✅ Prompt updated! Will be used for next extraction.")
-        
-        with tab2:
-            st.markdown("""
-            ### Prompt Guidelines:
-            - **{TEXT}** placeholder is required - gets replaced with paper content
-            - Define clear JSON schema for consistent outputs
-            - Include few-shot examples for better accuracy
-            - Specify fields explicitly (virus, protein, mutation, effect, etc.)
-            - Request evidence quotes for validation
-            """)
-            
-        with tab3:
-            st.code(edited_prompt[:1000] + "\n\n... (truncated)" if len(edited_prompt) > 1000 else edited_prompt, language="text")
-        
-        # Reset button
-        col1, col2 = st.columns([1, 4])
+        col1, col2, col3 = st.columns([1, 1, 3])
         with col1:
+            if st.button("💾 Save Changes"):
+                PROMPTS.analyst_prompt_editable = edited_section
+                # Clear any override to use the new editable section
+                PROMPTS._analyst_prompt_override = ""
+                st.success("✅ Prompt updated! Will be used for next extraction.")
+                st.rerun()
+        
+        with col2:
             if st.button("🔄 Reset to Default"):
                 from llm.prompts import AnalystPrompts
-                PROMPTS.analyst_prompt = AnalystPrompts().analyst_prompt
+                default_prompts = AnalystPrompts()
+                PROMPTS.analyst_prompt_editable_part1 = default_prompts.analyst_prompt_editable_part1
+                PROMPTS.analyst_prompt_editable_part2 = default_prompts.analyst_prompt_editable_part2
+                PROMPTS._analyst_prompt_override = ""
+                st.success("✅ Reset to default prompt.")
                 st.rerun()
+        
+        # Optional: Show preview of full prompt (collapsed by default)
+        with st.expander("👁️ Preview Full Prompt (Read-only)", expanded=False):
+            st.markdown("**Full assembled prompt that will be sent to the LLM:**")
+            full_preview = PROMPTS.analyst_prompt
+            st.code(full_preview, language="text", line_numbers=False)
+            st.caption("💡 This is what the LLM receives. The editable section is embedded in the middle.")
 
     # ===== Search Section =====
     st.subheader("1) Enter your PubMed query (reviews only)")
