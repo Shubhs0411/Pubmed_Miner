@@ -17,11 +17,6 @@ try:
 except Exception:
     anthropic = None
 
-try:
-    from . import huggingface  # noqa: F401
-except Exception:
-    huggingface = None
-
 # Re-export for backward compatibility
 from .gemini import run_on_paper as gemini_run_on_paper, clean_and_ground as gemini_clean_and_ground, DEFAULT_MODEL as GEMINI_DEFAULT_MODEL  # noqa: F401
 
@@ -46,12 +41,6 @@ except Exception:
     anthropic_clean_and_ground = None
     ANTHROPIC_DEFAULT_MODEL = None
 
-try:
-    from .huggingface import run_on_paper as huggingface_run_on_paper, DEFAULT_MODEL as HUGGINGFACE_DEFAULT_MODEL  # noqa: F401
-except Exception:
-    huggingface_run_on_paper = None
-    HUGGINGFACE_DEFAULT_MODEL = None
-
 __all__ = [
     # Modules (available if imports succeeded)
     "gemini",
@@ -69,8 +58,6 @@ __all__ = [
     "anthropic_run_on_paper",
     "anthropic_clean_and_ground",
     "ANTHROPIC_DEFAULT_MODEL",
-    "huggingface_run_on_paper",
-    "HUGGINGFACE_DEFAULT_MODEL",
 ]
 
 

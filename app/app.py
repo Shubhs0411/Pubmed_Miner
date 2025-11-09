@@ -92,7 +92,7 @@ def main():
         # Model selection
         model_choice = st.selectbox(
             "Select LLM Model",
-            ["Gemini (Google)", "GPT-4o (OpenAI)", "Claude (Anthropic)", "Llama (Groq)", "Hugging Face (Any Model)"],
+            ["Gemini (Google)", "GPT-4o (OpenAI)", "Claude (Anthropic)", "Llama (Groq)"],
             index=0,
             help="Choose which LLM to use for extraction"
         )
@@ -138,28 +138,6 @@ def main():
             )
             api_key_env_var = "GROQ_API_KEY"
             model_name = st.text_input("Model Name", value="llama-3.3-70b-versatile")
-            
-        elif "Hugging Face" in model_choice:  # Hugging Face
-            api_key = st.text_input(
-                "Hugging Face API Key",
-                value=os.getenv("HF_API_KEY", "") or os.getenv("HUGGINGFACE_API_KEY", ""),
-                type="password",
-                help="Get from: https://huggingface.co/settings/tokens"
-            )
-            api_key_env_var = "HF_API_KEY"
-            default_model = st.text_input(
-                "Model Name (e.g., gpt2)", 
-                value="gpt2",
-                help="Free tier models: gpt2, distilgpt2, google/flan-t5-base. Note: Most instruction models require gated access or paid tier. For best results, use Groq/OpenAI/Anthropic."
-            )
-            
-            st.warning(
-                "⚠️ **Important**: Hugging Face free Inference API has very limited models available. "
-                "Most instruction-tuned models (Qwen, Phi, Mistral, etc.) require gated access or paid subscriptions. "
-                "For reliable structured JSON extraction, we strongly recommend using Groq, OpenAI, or Anthropic instead.",
-                icon="⚠️"
-            )
-            model_name = default_model
         
         # Strip whitespace from API key
         if api_key:

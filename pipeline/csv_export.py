@@ -180,8 +180,6 @@ def flatten_to_rows(batch: Dict[str, Dict]) -> pd.DataFrame:
                 "virus": f.get("virus") or "",
                 "protein": f.get("protein") or "",
                 "mutation": f.get("mutation") or "",
-                "feature_name": feature_name,  # NEW: for domains/regions
-                "region_range": region_range,  # NEW: e.g., "1-73; 85-207"
                 "position": pos_val,
                 "confidence": conf,
                 "quote": first_quote,  # Will be merged later

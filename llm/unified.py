@@ -17,11 +17,6 @@ try:
 except ImportError:
     anthropic = None
 
-try:
-    from llm import huggingface
-except ImportError:
-    huggingface = None
-
 
 def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
@@ -51,10 +46,6 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         return _run_anthropic(paper_text, meta)
     elif "Llama" in model_choice or "Groq" in model_choice:
         return _run_groq(paper_text, meta)
-    elif "Hugging Face" in model_choice or "HF" in model_choice:
-        if huggingface is None:
-            raise RuntimeError("Hugging Face module not available. Make sure llm/huggingface.py exists.")
-        return _run_huggingface(paper_text, meta)
     else:
         # Default to Gemini
         return _run_gemini(paper_text, meta)
@@ -99,11 +90,6 @@ def _run_openai(paper_text: str, meta: Dict[str, Any]) -> Dict[str, Any]:
 def _run_anthropic(paper_text: str, meta: Dict[str, Any]) -> Dict[str, Any]:
     """Anthropic Claude backend - uses anthropic.py which handles API key internally."""
     return anthropic.run_on_paper(paper_text, meta)
-
-
-def _run_huggingface(paper_text: str, meta: Dict[str, Any]) -> Dict[str, Any]:
-    """Hugging Face Inference API backend - uses huggingface.py which handles API key internally."""
-    return huggingface.run_on_paper(paper_text, meta)
 
 
 # Helper functions are now in llm.utils - all LLMs use the same implementation
