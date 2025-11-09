@@ -125,10 +125,10 @@ def overlaps(a: Tuple[Optional[date], Optional[date]],
 
 
 def to_pdat(d: Optional[date]) -> Optional[str]:
-    """Convert date object to PubMed pdat string 'YYYY/MM/DD'."""
+    """Convert date object to PubMed pdat string 'YYYY/MM' (required by NCBI API)."""
     if not d:
         return None
-    return f"{d.year:04d}/{d.month:02d}/{d.day:02d}"
+    return f"{d.year:04d}/{d.month:02d}"
 
 
 # -------------------- E-utilities wrappers --------------------
@@ -165,11 +165,25 @@ def esearch_reviews(query: str, *,
                     cap: int = 2000,
                     open_access_only: bool = False) -> List[str]:
     """
-    Search PubMed for review PMIDs matching the query + date bounds (pdat).
+    Search PubMed for review PMIDs matching the query + date bounds.
     Pages through results up to 'cap'.
     If open_access_only=True, adds PMC Open Access filter to the query.
+    
+    Args:
+        query: Search query string
+        mindate: Minimum date in YYYY/MM format (e.g., "2020/01")
+        maxdate: Maximum date in YYYY/MM format (e.g., "2020/12")
+        sort: Sort order ("relevance" or "pub+date")
+        retmax: Results per page
+        cap: Maximum total results
+        open_access_only: If True, restrict to open access papers
+    
+    Note: Query is normalized to lowercase to avoid PubMed parser issues with uppercase + hyphens.
     """
-    q = as_review_query(query, open_access_only=open_access_only)
+    # Normalize query to lowercase to avoid PubMed parser issues with uppercase + hyphens
+    normalized_query = query.lower()
+    q = as_review_query(normalized_query, open_access_only=open_access_only)
+    
     ids: List[str] = {}
     ids = []
     retstart = 0

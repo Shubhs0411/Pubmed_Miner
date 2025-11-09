@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import os, json, io, zipfile
 from datetime import date
+import calendar
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
 from services.pmc import get_last_fetch_source
 from services.pubmed import (
-    esearch_reviews, esummary, parse_pubdate_interval, overlaps, to_pdat
+    esearch_reviews, esummary, parse_pubdate_interval, overlaps
 )
 from pipeline.batch_analyze import fetch_all_fulltexts, analyze_texts, flatten_to_rows
 
@@ -47,8 +48,45 @@ def main():
     st.title("🧪 PubMed Review Miner")
     st.caption("Search review articles, fetch PMC full text, run your LLM extractor, and download findings.")
 
-    # ===== NEW: Model & API Key Configuration Section =====
+    # ===== Sidebar Configuration =====
     with st.sidebar:
+        # NCBI Configuration (needed for search)
+        st.header("🔬 NCBI Configuration")
+        st.caption("Required for PubMed search")
+        
+        ncbi_api_key = st.text_input(
+            "NCBI API Key",
+            value=os.getenv("NCBI_API_KEY", ""),
+            type="password",
+            help="Get from: https://www.ncbi.nlm.nih.gov/account/settings/"
+        )
+        
+        # Strip whitespace and update environment
+        if ncbi_api_key:
+            ncbi_api_key = ncbi_api_key.strip()
+            os.environ["NCBI_API_KEY"] = ncbi_api_key
+            st.success("✅ NCBI API Key set")
+        elif os.getenv("NCBI_API_KEY"):
+            st.info("ℹ️ Using NCBI API Key from .env file")
+        else:
+            st.warning("⚠️ No API Key (limited to 3 requests/second)")
+        
+        # Test connection
+        with st.expander("🔧 Test NCBI Connection", expanded=False):
+            if st.button("Test Quick Search", key="test_ncbi"):
+                try:
+                    with st.spinner("Testing NCBI connection..."):
+                        test_pmids = esearch_reviews("covid-19", mindate="2020/01/01", maxdate="2020/12/31", sort="relevance", cap=5)
+                        if test_pmids:
+                            st.success(f"✅ NCBI working! Found {len(test_pmids)} test results")
+                        else:
+                            st.warning("⚠️ NCBI returned 0 results (may be normal for this query)")
+                except Exception as e:
+                    st.error(f"❌ NCBI connection failed:\n```\n{str(e)}\n```")
+        
+        st.divider()
+        
+        # LLM Configuration
         st.header("🤖 LLM Configuration")
         
         # Model selection
@@ -187,20 +225,35 @@ def main():
                 PROMPTS.analyst_prompt = AnalystPrompts().analyst_prompt
                 st.rerun()
 
-    # ===== Search Section (unchanged) =====
+    # ===== Search Section =====
     st.subheader("1) Enter your PubMed query (reviews only)")
+    
+    # Show NCBI API status in main area
+    if not os.getenv("NCBI_API_KEY"):
+        st.info("💡 **Tip:** Add your NCBI API key in the sidebar (👈) to increase rate limits from 3 to 10 requests/second.")
+    
     st.write("Paste a PubMed query (we'll restrict to **Review** articles automatically).")
     query = st.text_area("Query", height=100, placeholder='e.g., dengue[MeSH Terms] AND mutation[Text Word]')
 
     st.subheader("2) Choose publication date range & search")
-    colA, colB, colC = st.columns([1, 1, 1])
+    colA, colB, colC, colD = st.columns([1, 1, 1, 1])
     with colA:
-        default_range = (date(2005, 1, 1), date(2025, 12, 31))
-        rng = st.date_input("Inclusive range", value=default_range, min_value=date(2005, 1, 1), 
-                           help="Earliest allowed start date is Jan 1, 2005.")
+        mindate = st.text_input(
+            "Start Date (MM/YYYY)", 
+            value="01/2005",
+            placeholder="MM/YYYY",
+            help="Enter start date in MM/YYYY format (e.g., 01/2020)"
+        )
     with colB:
-        sort = st.selectbox("Sort", ["relevance", "pub+date"], index=0)
+        maxdate = st.text_input(
+            "End Date (MM/YYYY)", 
+            value="12/2025",
+            placeholder="MM/YYYY",
+            help="Enter end date in MM/YYYY format (e.g., 12/2025)"
+        )
     with colC:
+        sort = st.selectbox("Sort", ["relevance", "pub+date"], index=0)
+    with colD:
         cap = st.slider("Max records", 0, 500, 100, 100)
 
     go = st.button("🔎 Search PubMed (reviews)")
@@ -208,39 +261,86 @@ def main():
         if not query.strip():
             st.warning("Please enter a query.")
         else:
-            start_date, end_date = (rng if isinstance(rng, tuple) else (rng, rng))
-            mindate = to_pdat(start_date)
-            maxdate = to_pdat(end_date)
+            # Validate and convert MM/YYYY to YYYY/MM format for NCBI
+            try:
+                # Parse MM/YYYY input
+                min_parts = mindate.strip().split("/")
+                max_parts = maxdate.strip().split("/")
+                
+                if len(min_parts) != 2 or len(max_parts) != 2:
+                    st.error("❌ Invalid date format. Please use MM/YYYY (e.g., 01/2020)")
+                    st.stop()
+                
+                # Convert MM/YYYY to YYYY/MM for NCBI API
+                mindate_formatted = f"{min_parts[1]}/{min_parts[0]}"
+                maxdate_formatted = f"{max_parts[1]}/{max_parts[0]}"
+                
+                # Create date objects for overlap checking
+                start_date = date(int(min_parts[1]), int(min_parts[0]), 1)
+                # Last day of month for end date
+                end_year, end_month = int(max_parts[1]), int(max_parts[0])
+                last_day = calendar.monthrange(end_year, end_month)[1]
+                end_date = date(end_year, end_month, last_day)
+                
+            except Exception as e:
+                st.error(f"❌ Invalid date format: {e}. Please use MM/YYYY (e.g., 01/2020)")
+                st.stop()
             
-            with st.spinner("Searching PubMed (reviews)…"):
-                pmids = esearch_reviews(query.strip(), mindate=mindate, maxdate=maxdate, sort=sort, cap=cap)
-                sums = esummary(pmids)
+            try:
+                with st.spinner("Searching PubMed (reviews)…"):
+                    pmids = esearch_reviews(query.strip(), mindate=mindate_formatted, maxdate=maxdate_formatted, sort=sort, cap=cap)
+                    
+                    if not pmids:
+                        st.warning(f"❌ **No results found for your query.**\n\n"
+                                  f"**Your query:** `{query.strip()}`\n\n"
+                                  f"**Tips:**\n"
+                                  f"- Try broader search terms\n"
+                                  f"- Check spelling\n"
+                                  f"- Expand date range (currently {start_date} to {end_date})\n"
+                                  f"- Try a simpler query (e.g., just 'dengue mutation')")
+                        for k in ["hits_df", "hits_pmids", "selected_pmids"]:
+                            if k in st.session_state:
+                                del st.session_state[k]
+                    else:
+                        st.info(f"✅ Found {len(pmids)} PMIDs from NCBI. Fetching metadata...")
+                        sums = esummary(pmids)
+                        
+                        rows = []
+                        for pid in pmids:
+                            meta = sums.get(pid, {})
+                            pubdate_raw = meta.get("pubdate") or ""
+                            if overlaps(parse_pubdate_interval(pubdate_raw), (start_date, end_date)):
+                                rows.append({
+                                    "PMID": str(pid),
+                                    "Title": meta.get("title") or "",
+                                    "Journal": meta.get("source") or "",
+                                    "PubDate": pubdate_raw,
+                                    "PubMed Link": f"https://pubmed.ncbi.nlm.nih.gov/{pid}/",
+                                })
+                        
+                        df_hits = pd.DataFrame(rows)
+                        if df_hits.empty:
+                            for k in ["hits_df", "hits_pmids", "selected_pmids"]:
+                                if k in st.session_state:
+                                    del st.session_state[k]
+                            st.warning(f"⚠️ **Found {len(pmids)} results, but none match your date range.**\n\n"
+                                      f"Date range: {start_date} to {end_date}\n\n"
+                                      f"Try expanding the date range above.")
+                        else:
+                            df_hits["PMID"] = df_hits["PMID"].astype(str)
+                            _persist("hits_df", df_hits.to_dict("records"))
+                            _persist("hits_pmids", df_hits["PMID"].tolist())
+                            st.session_state["selected_pmids"] = []
+                            st.success(f"✅ Found {len(df_hits)} results. See 'Results' below to select papers.")
             
-            rows = []
-            for pid in pmids:
-                meta = sums.get(pid, {})
-                pubdate_raw = meta.get("pubdate") or ""
-                if overlaps(parse_pubdate_interval(pubdate_raw), (start_date, end_date)):
-                    rows.append({
-                        "PMID": str(pid),
-                        "Title": meta.get("title") or "",
-                        "Journal": meta.get("source") or "",
-                        "PubDate": pubdate_raw,
-                        "PubMed Link": f"https://pubmed.ncbi.nlm.nih.gov/{pid}/",
-                    })
-            
-            df_hits = pd.DataFrame(rows)
-            if df_hits.empty:
-                for k in ["hits_df", "hits_pmids", "selected_pmids"]:
-                    if k in st.session_state:
-                        del st.session_state[k]
-                st.info("No results in this date range.")
-            else:
-                df_hits["PMID"] = df_hits["PMID"].astype(str)
-                _persist("hits_df", df_hits.to_dict("records"))
-                _persist("hits_pmids", df_hits["PMID"].tolist())
-                st.session_state["selected_pmids"] = []
-                st.success(f"Found {len(df_hits)} results. See 'Results' below to select papers.")
+            except Exception as e:
+                st.error(f"❌ **Error searching PubMed:**\n\n"
+                        f"```\n{str(e)}\n```\n\n"
+                        f"**Troubleshooting:**\n"
+                        f"1. Check your internet connection\n"
+                        f"2. Verify NCBI API key in `.env` file\n"
+                        f"3. Try again in a few seconds (rate limiting)\n"
+                        f"4. Simplify your query")
 
     # ===== Results display (unchanged) =====
     if st.session_state.get("hits_df"):

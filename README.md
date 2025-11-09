@@ -168,11 +168,21 @@ pip install -r requirements.txt
 - **Result**: Faster PMC fetching, fewer rate limit errors
 - **Required for**: Reliable operation and better performance
 
-#### Create .env file
+#### Configure API Keys
+
+**Option 1: Enter in the Web UI (Recommended)**
+- Start the app and enter your API keys in the sidebar
+- Changes take effect immediately
+- Easy to switch between different keys
+
+**Option 2: Create .env file**
 Create a **.env** file in the project root:
 
 ```dotenv
-# Required: Choose ONE LLM backend (or provide multiple and choose in UI)
+# NCBI (Required for PubMed search)
+NCBI_API_KEY="your_ncbi_api_key_here"
+
+# LLM: Choose ONE backend (or provide multiple and choose in UI)
 GEMINI_API_KEY="your_gemini_api_key_here"
 # OR
 # GROQ_API_KEY="your_groq_api_key_here"
@@ -193,7 +203,10 @@ PAPER_PAUSE_SEC=3.0
 CONTACT_EMAIL="your_email@example.com"
 ```
 
-> **Note**: You can export these as environment variables instead of using `.env` if you prefer.
+> **Note**: 
+> - API keys entered in the web UI take **priority** over `.env` file
+> - The app will use `.env` as a fallback if no key is entered in the UI
+> - You can export these as environment variables instead of using `.env` if you prefer
 
 ### Step 6: Run the app
 ```bash
