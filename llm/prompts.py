@@ -218,11 +218,63 @@ A Sequence Feature (SF) is any amino-acid feature with biological significance:
 • signals (NLS/NES/cleavage sites) tied to function/phenotype
 
 **CRITICAL**: Extract ALL structural regions even if they have NO mutation or variant. A domain description with coordinates IS a sequence feature.
+
+PATTERN RECOGNITION GUIDE
+Systematically scan the text for these patterns. Extract ALL instances you find:
+
+**Mutation Patterns:**
+• Standard format: Single letter + number + single letter (e.g., A226V, K128E, S123A, D456F)
+• With asterisk: Single letter + number + asterisk (e.g., W123*, Q456*)
+• Reversed format: Number + single letter (e.g., 226V, 128E) - convert to standard format
+• HGVS protein notation: p.SingleThreeDigitSingleThree (e.g., p.Ala226Val, p.Lys128Glu, p.Ser123Ala)
+• Spelled mutations: "alanine 226 to valine", "lysine 128 to glutamic acid", "residue 226 changed from A to V"
+• Substitution phrases: "A226V substitution", "mutation at position 226 (A→V)", "226A/V"
+
+**Protein Patterns:**
+• Protein names followed by "protein": "E1 protein", "NS3 protein", "capsid protein", "envelope protein"
+• Protein names with descriptors: "E1 glycoprotein", "NS3 polyprotein", "E2 envelope protein"
+• Protein complexes: "E1-E2 complex", "capsid-subunit", "protein complex"
+• Abbreviations: Look for protein abbreviations (E1, E2, NS1, NS2, NS3, NS4, NS5, C, M, etc.)
+
+**Residue Number Patterns:**
+• Single residues: "residue 226", "position 128", "amino acid 456", "aa 123"
+• Ranges: "residues 1-73", "amino acids 420-440", "residues 85 to 207", "1-460 aa"
+• Range phrases: "residues 1 through 73", "from residue 85 to 207", "spanning residues 420-440"
+• Count references: "73 amino acids", "460 aa", "207 residues" (may indicate domain boundaries)
+
+**Amino Acid Position Patterns:**
+• Single letter + position: "A226", "K128", "S123", "D456"
+• Three-letter + position: "Ala226", "Lys128", "Ser123", "Asp456"
+• Full name + position: "alanine 226", "lysine 128", "serine 123", "aspartic acid 456"
+• With context: "residue A226", "position K128", "amino acid Ser123"
+
+**Structural Domain Patterns:**
+• Domain with coordinates: "RNA-binding domain (residues 1-73)", "effector domain (85-207 aa)", "catalytic domain spanning residues 50-150"
+• Domain phrases: "amino acids 1-73 form the RNA-binding domain", "residues 85-207 constitute the effector domain"
+• Transmembrane: "transmembrane domain at residues 420-440", "TM domain (420-440)", "transmembrane region 200-220"
+• Linker regions: "flexible linker 74-84 aa", "linker region (74-84)", "connecting residues 74-84"
+• Terminal regions: "C-terminal tail (178-207 aa)", "N-terminal domain (1-100)", "C-terminus (residues 450-460)"
+
+**Motif Patterns:**
+• Sequence motifs: "HExxH motif", "ATLG motif", "GxGxxG motif"
+• Pattern descriptions: "conserved sequence ATLG", "motif pattern HExxH", "signature sequence"
+• Short sequences: 3-10 uppercase letters, possibly with x/X for variable positions
+
+**Coverage Strategy:**
+1. First pass: Systematically scan the ENTIRE text for ALL patterns listed above
+2. For each pattern found, extract it as a feature with full context
+3. Do not skip any pattern - if you see it, extract it
+4. Pay special attention to mutations in any format (standard, HGVS, spelled, etc.)
+5. Extract structural domains even if they don't have mutations
+6. Ensure no mutation or domain is missed due to format variations
 """
 
     # Part 2: INSTRUCTIONS (comes after EXAMPLES)
     analyst_prompt_editable_part2: str = """INSTRUCTIONS
 • **CRITICAL**: Extract ALL structural domains, regions, linkers, and tails WITH their coordinates, even if no mutation is mentioned.
+• **PATTERN COVERAGE**: Use the PATTERN RECOGNITION GUIDE above to systematically find ALL mutations, proteins, residues, domains, and motifs. Do not miss any pattern variant.
+• **MUTATION FORMATS**: Extract mutations in ALL formats - standard (A226V), HGVS (p.Ala226Val), spelled ("alanine 226 to valine"), and substitution phrases. Convert all to standard format when possible.
+• **COMPREHENSIVE SCANNING**: Before extracting, internally list ALL mutations, proteins, residues, and domains you find. Ensure every one is either extracted or explicitly noted as lacking detail.
 • If multiple features appear in one sentence, output multiple JSON objects (one per feature).
 • If ranges are textual (e.g., "~244–263 aa"), capture integers only (244–263).
 • For regions spanning the sentence (e.g., "1-73 aa"), calculate the range if "last X residues" is mentioned.
@@ -230,7 +282,7 @@ A Sequence Feature (SF) is any amino-acid feature with biological significance:
 • Prefer experimental evidence; if unclear, set evidence_level = "inferred" or "computational".
 • Set motif_pattern for sequence motifs (e.g., "HExxH", "ATLG"); else null.
 • When interactions between proteins are described, populate the interactions block; otherwise set each field to null.
-• Ensure every protein, mutation, domain, AND structural region identified in your preparatory scan is either extracted as a feature or explicitly discarded for lacking residue-level detail.
+• **NO MISSING PATTERNS**: If you see a mutation pattern (in any format), a protein mention, a residue number, or a domain description, you MUST extract it. Do not skip patterns due to format variations.
 """
     
     # Combined editable section for UI (combines part1 and part2)

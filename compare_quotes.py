@@ -12,10 +12,23 @@ from typing import Iterable, Dict, List, Tuple
 import pandas as pd
 
 # ===== DEFAULT WINDOWS PATHS (override via CLI if needed) =====
-DEFAULT_MANUAL_XLSX = Path(r"C:\Users\sdeshmuk\Desktop\Pubmed_Miner\Manually_Curatd_Influenza.xlsx")
-DEFAULT_LATEST_CSV  = Path(r"C:\Users\sdeshmuk\Downloads\Latest_Influenza_A_pubmed_mutation_findings.csv")
+DEFAULT_MANUAL_XLSX = Path(r"/Users/shubhamlaxmikantdeshmukh/Downloads/Manually_Curatd_Influenza.xlsx")
+DEFAULT_LATEST_CSV  = Path(r"/Users/shubhamlaxmikantdeshmukh/Downloads/Test_pubmed_mutation_findings.csv")
 
 PMID_URL_RE = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d+)/?", re.IGNORECASE)
+
+# Choose an Excel engine based on file extension
+def _choose_excel_engine(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
+        return "openpyxl"   # pip install openpyxl  (or conda install openpyxl)
+    if ext in {".xls"}:
+        return "xlrd"       # pip install xlrd     (or conda install xlrd)
+    if ext in {".ods"}:
+        return "odf"        # pip install odfpy    (or conda install odfpy)
+    # Fall back to openpyxl for unknown-but-probably-xlsx
+    return "openpyxl"
+
 
 # ---------- Helpers ----------
 def normalize_text(s: str) -> str:
@@ -62,7 +75,16 @@ def extract_manual_quotes_from_excel(xlsx_path: Path) -> Tuple[pd.DataFrame, Dic
       df_manual_quotes: [pmid, quote, source_row, source_col]
       pmid_to_manual: pmid -> list of quotes
     """
-    df_raw = pd.read_excel(xlsx_path, header=None, dtype=str)
+    engine = _choose_excel_engine(xlsx_path)
+    try:
+        df_raw = pd.read_excel(xlsx_path, header=None, dtype=str, engine=engine)
+    except ValueError as e:
+        raise RuntimeError(
+            f"Failed to read Excel file '{xlsx_path}' with engine='{engine}'. "
+            f"Install the required engine (e.g., 'pip install {engine}' or 'conda install {engine}'). "
+            f"Original error: {e}"
+        )
+
     rows: List[Dict] = []
     pmid_to_manual: Dict[str, List[str]] = {}
 
@@ -334,6 +356,56 @@ def run(
     print(f"Saved: {out_summary}")
     print(f"Saved: {out_details}")
     print(f"Saved: {out_totals}")
+        # ---- Unmatched exports ----
+    # 1) Manual sentences that didn't match anything
+    if not df_summary.empty:
+        zero_match_mask = (
+            (df_summary["exact_match_count"] == 0)
+            & (df_summary["substring_match_count"] == 0)
+            & (df_summary[f"fuzzy_match_count(>={fuzzy_threshold})"] == 0)
+        )
+        df_unmatched_manual = df_summary.loc[
+            zero_match_mask,
+            ["pmid", "pmid_manual_sentence_index", "manual_sentence", "best_fuzzy_score", "best_row_index"]
+        ].copy()
+    else:
+        df_unmatched_manual = pd.DataFrame(columns=[
+            "pmid", "pmid_manual_sentence_index", "manual_sentence", "best_fuzzy_score", "best_row_index"
+        ])
+
+    # 2) Latest quotes that were never hit by any match
+    if not df_detail.empty:
+        matched_idx = set(df_detail["latest_global_index"].dropna().astype(int).unique())
+    else:
+        matched_idx = set()
+    df_unmatched_latest_all = df_latest.loc[~df_latest.index.isin(matched_idx)].copy()
+
+    # 3) Same as (2) but restricted to PMIDs that also appear in the MANUAL Excel
+    manual_pmids = set(pmid_to_manual.keys())
+    if "pmid_str" not in df_latest.columns:
+        df_latest["pmid_str"] = df_latest["pmid"].astype(str).str.extract(r"(\d+)")[0]
+
+    if not df_unmatched_latest_all.empty:
+        df_unmatched_latest_within = df_unmatched_latest_all[
+            df_unmatched_latest_all["pmid_str"].isin(manual_pmids)
+        ].copy()
+    else:
+        df_unmatched_latest_within = pd.DataFrame(columns=df_latest.columns)
+
+    # Write them out
+    out_unmatched_manual = save_dir / "unmatched_manual_sentences.csv"
+    out_unmatched_latest_all = save_dir / "unmatched_latest_quotes_all.csv"
+    out_unmatched_latest_within = save_dir / "unmatched_latest_quotes_within_excel_pmids.csv"
+
+    df_unmatched_manual.to_csv(out_unmatched_manual, index=False, encoding="utf-8")
+    df_unmatched_latest_all.to_csv(out_unmatched_latest_all, index=False, encoding="utf-8")
+    df_unmatched_latest_within.to_csv(out_unmatched_latest_within, index=False, encoding="utf-8")
+
+    print(f"Saved: {out_unmatched_manual}  (manual sentences with no matches)")
+    print(f"Saved: {out_unmatched_latest_all}  (latest quotes with no matches, all PMIDs)")
+    print(f"Saved: {out_unmatched_latest_within}  (latest quotes with no matches, limited to Excel PMIDs)")
+
+
     if not df_missing.empty:
         print(f"Saved: {out_missing}  (PMIDs present in Excel but not in CSV)")
     else:
