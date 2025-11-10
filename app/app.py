@@ -7,6 +7,7 @@ import calendar
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+from typing import Dict
 
 from services.pmc import get_last_fetch_source
 from services.pubmed import (
@@ -92,13 +93,25 @@ def main():
         # Model selection
         model_choice = st.selectbox(
             "Select LLM Model",
-            ["Gemini (Google)", "GPT-4o (OpenAI)", "Claude (Anthropic)", "Llama (Groq)"],
+            [
+                "Gemini (Google)",
+                "GPT-4o (OpenAI)",
+                "Claude (Anthropic)",
+                "Llama (Groq)",
+                "Custom (Hackathon)",
+            ],
             index=0,
             help="Choose which LLM to use for extraction"
         )
         
         # API Key input based on selection
         api_key_env_var = None
+        api_key = ""
+        model_name = ""
+        custom_api_url = os.getenv("CUSTOM_LLM_URL", "")
+        custom_headers_json = os.getenv("CUSTOM_LLM_HEADERS", "")
+        custom_headers_dict: Dict[str, str] = {}
+        custom_timeout = int(os.getenv("CUSTOM_LLM_TIMEOUT", "120") or 120)
         if "Gemini" in model_choice:
             api_key = st.text_input(
                 "Gemini API Key",
@@ -139,11 +152,103 @@ def main():
             api_key_env_var = "GROQ_API_KEY"
             model_name = st.text_input("Model Name", value="llama-3.3-70b-versatile")
         
-        # Strip whitespace from API key
+        elif "Custom" in model_choice:
+            st.info("🎯 **Hackathon Models**: Select from the available models provided through the local proxy.")
+            
+            # Hackathon models from the capability matrix
+            HACKATHON_MODELS = [
+                "gpt35",
+                "gpt35large",
+                "gpt4",
+                "gpt4large",
+                "gpt4turbo",
+                "gpt4o",
+                "gpto1",
+                "gpto1mini",
+                "gpto3",
+                "gpto3mini",
+                "gpto4mini",
+                "gpt41",
+                "gpt41mini",
+                "gpt41nano",
+                "gpt5",
+                "gpt5mini",
+                "gpt5nano",
+                "gemini25pro",
+                "gemini25flash",
+                "claudeopus4",
+                "claudeopus41",
+                "claudesonnet4",
+                "claudesonnet45",
+                "claudesonnet37",
+                "claudesonnet35v2",
+            ]
+            
+            # Model selector with auto-populate
+            selected_model = st.selectbox(
+                "Select Hackathon Model",
+                options=[""] + HACKATHON_MODELS,
+                index=0,
+                help="Choose from the 25 models available through the local proxy. All models support text extraction."
+            )
+            
+            # Auto-populate model name if selected, otherwise allow manual entry
+            if selected_model:
+                model_name = selected_model
+                os.environ["CUSTOM_LLM_MODEL"] = model_name
+            else:
+                model_name = st.text_input(
+                    "Model Name (or select from dropdown above)",
+                    value=os.getenv("CUSTOM_LLM_MODEL", ""),
+                    help="Enter model name manually if not in the dropdown"
+                )
+            
+            custom_api_url = st.text_input(
+                "Local Proxy API URL",
+                value=custom_api_url,
+                help="The proxy endpoint URL provided by hackathon organizers (e.g., http://localhost:8080/v1/completions or https://proxy.hackathon.local/v1/completions)"
+            ).strip()
+            if custom_api_url:
+                os.environ["CUSTOM_LLM_URL"] = custom_api_url
+            
+            api_key = st.text_input(
+                "API Key (optional)",
+                value=os.getenv("CUSTOM_LLM_API_KEY", ""),
+                type="password",
+                help="Leave blank if the proxy does not require authentication."
+            )
+            api_key_env_var = "CUSTOM_LLM_API_KEY"
+            custom_headers_json = st.text_area(
+                "Extra HTTP headers (JSON)",
+                value=custom_headers_json,
+                help="Optional: JSON object of additional headers. Example: {\"X-Org\": \"Team-42\"}"
+            )
+            parsed_headers: Dict[str, str] = {}
+            if custom_headers_json.strip():
+                try:
+                    parsed_headers = json.loads(custom_headers_json.strip())
+                    if not isinstance(parsed_headers, dict):
+                        raise ValueError("Headers JSON must be an object")
+                except Exception:
+                    st.error("Extra HTTP headers must be a valid JSON object of key-value pairs.")
+                    parsed_headers = {}
+            custom_headers_dict = parsed_headers
+            custom_timeout = st.number_input(
+                "Request timeout (seconds)",
+                min_value=5,
+                max_value=600,
+                value=custom_timeout,
+                help="Adjust if the endpoint is slow."
+            )
+            os.environ["CUSTOM_LLM_TIMEOUT"] = str(custom_timeout)
+            if custom_headers_dict:
+                os.environ["CUSTOM_LLM_HEADERS"] = json.dumps(custom_headers_dict)
+        
+        # Strip whitespace from API key and persist in environment for backend usage
         if api_key:
             api_key = api_key.strip()
-            # Update environment variable (but frontend will take priority in backend)
-            os.environ[api_key_env_var] = api_key
+            if api_key_env_var:
+                os.environ[api_key_env_var] = api_key
         
         st.divider()
         
@@ -409,8 +514,11 @@ def main():
         
         # Validate API key (strip whitespace first)
         api_key = api_key.strip() if api_key else ""
-        if not api_key:
+        if not api_key and "Custom" not in model_choice:
             st.error(f"⚠️ Please enter your {model_choice} API key in the sidebar!")
+            st.stop()
+        if "Custom" in model_choice and not custom_api_url:
+            st.error("⚠️ Please provide the Custom LLM API URL in the sidebar before running extraction.")
             st.stop()
         
         st.info(f"🤖 Using **{model_choice}** (model: `{model_name}`)")
@@ -522,6 +630,14 @@ def main():
             "analyst_prompt": PROMPTS.analyst_prompt,  # Current prompt (includes user edits)
         }
         
+        if "Custom" in model_choice:
+            if not custom_api_url:
+                st.warning("Please provide the Custom LLM API URL before running extraction.")
+            llm_meta["api_url"] = custom_api_url
+            llm_meta["timeout"] = custom_timeout
+            if custom_headers_dict:
+                llm_meta["extra_headers"] = custom_headers_dict
+
         total = len(ok_pmids_this_run)
         for i, pmid in enumerate(ok_pmids_this_run, start=1):
             title = papers[pmid].get("title") or ""

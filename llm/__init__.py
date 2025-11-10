@@ -17,6 +17,11 @@ try:
 except Exception:
     anthropic = None
 
+try:
+    from . import custom  # noqa: F401
+except Exception:
+    custom = None
+
 # Re-export for backward compatibility
 from .gemini import run_on_paper as gemini_run_on_paper, clean_and_ground as gemini_clean_and_ground, DEFAULT_MODEL as GEMINI_DEFAULT_MODEL  # noqa: F401
 
@@ -41,6 +46,14 @@ except Exception:
     anthropic_clean_and_ground = None
     ANTHROPIC_DEFAULT_MODEL = None
 
+try:
+    from .custom import run_on_paper as custom_run_on_paper, clean_and_ground as custom_clean_and_ground, DEFAULT_MODEL as CUSTOM_DEFAULT_MODEL, DEFAULT_URL as CUSTOM_DEFAULT_URL  # noqa: F401
+except Exception:
+    custom_run_on_paper = None
+    custom_clean_and_ground = None
+    CUSTOM_DEFAULT_MODEL = None
+    CUSTOM_DEFAULT_URL = None
+
 __all__ = [
     # Modules (available if imports succeeded)
     "gemini",
@@ -58,6 +71,10 @@ __all__ = [
     "anthropic_run_on_paper",
     "anthropic_clean_and_ground",
     "ANTHROPIC_DEFAULT_MODEL",
+    "custom_run_on_paper",
+    "custom_clean_and_ground",
+    "CUSTOM_DEFAULT_MODEL",
+    "CUSTOM_DEFAULT_URL",
 ]
 
 

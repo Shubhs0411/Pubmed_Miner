@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 from typing import Dict, Any, Optional
 
-from llm import gemini, groq
+from llm import gemini, groq, custom
 
 # Optional imports for OpenAI, Anthropic, and Hugging Face
 try:
@@ -46,6 +46,8 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         return _run_anthropic(paper_text, meta)
     elif "Llama" in model_choice or "Groq" in model_choice:
         return _run_groq(paper_text, meta)
+    elif "Custom" in model_choice:
+        return _run_custom(paper_text, meta)
     else:
         # Default to Gemini
         return _run_gemini(paper_text, meta)
@@ -90,6 +92,11 @@ def _run_openai(paper_text: str, meta: Dict[str, Any]) -> Dict[str, Any]:
 def _run_anthropic(paper_text: str, meta: Dict[str, Any]) -> Dict[str, Any]:
     """Anthropic Claude backend - uses anthropic.py which handles API key internally."""
     return anthropic.run_on_paper(paper_text, meta)
+
+
+def _run_custom(paper_text: str, meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Custom/backend-agnostic LLM endpoint."""
+    return custom.run_on_paper(paper_text, meta)
 
 
 # Helper functions are now in llm.utils - all LLMs use the same implementation
