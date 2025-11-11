@@ -5,15 +5,31 @@ services:
     ports:
       - "8501:8501"
     environment:
-      # Add your API keys here or use .env file
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GROQ_API_KEY=${GROQ_API_KEY}
+      # Required: NCBI API key for PubMed search
       - NCBI_API_KEY=${NCBI_API_KEY}
       - CONTACT_EMAIL=${CONTACT_EMAIL}
+      
+      # LLM API keys (choose one or provide multiple and select in UI)
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      
+      # Custom LLM settings (for hackathon/proxy endpoints)
+      - CUSTOM_LLM_URL=${CUSTOM_LLM_URL}
+      - CUSTOM_LLM_API_KEY=${CUSTOM_LLM_API_KEY}
+      - CUSTOM_LLM_MODEL=${CUSTOM_LLM_MODEL}
+      - CUSTOM_LLM_TIMEOUT=${CUSTOM_LLM_TIMEOUT:-120}
+      - CUSTOM_LLM_HEADERS=${CUSTOM_LLM_HEADERS}
+      
       # Rate limiting
       - GEMINI_RPM=${GEMINI_RPM:-10}
       - GEMINI_TPM=${GEMINI_TPM:-180000}
       - PAPER_PAUSE_SEC=${PAPER_PAUSE_SEC:-3.0}
+      
+      # Optional flags
+      - SAVE_RAW_LLM=${SAVE_RAW_LLM}
+      - PMC_MIN_JATS_CHARS=${PMC_MIN_JATS_CHARS:-800}
     volumes:
       # Mount .env file if it exists
       - ./.env:/app/.env:ro
@@ -21,7 +37,7 @@ services:
       - ./data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

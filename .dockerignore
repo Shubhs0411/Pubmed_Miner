@@ -55,7 +55,8 @@ docker-compose.yml
 .dockerignore
 
 # Documentation
-README.md
+*.md
+*.pptx
 docs/
 
 # Data and cache
@@ -67,6 +68,19 @@ logs/
 *.xlsx
 *.zip
 *.tar.gz
+
+# Tests and utilities
+tests/
+compare_quotes.py
+*.test.py
+*_test.py
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
 
 # Environment files (will be mounted)
 .env

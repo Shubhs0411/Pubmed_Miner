@@ -1,6 +1,6 @@
 # PubMed Miner
 
-A Streamlit app to search **PubMed** for review articles, fetch **PMC** full text (when available), and run a **Gemini**-powered extractor to mine mutation/protein findings with grounded snippets.
+A Streamlit app to search **PubMed** for review articles, fetch **PMC** full text (when available), and run an **LLM-powered** extractor to mine mutation/protein findings with grounded snippets. Supports multiple LLM backends: Gemini, OpenAI, Anthropic, Groq, and custom endpoints.
 
 ---
 
@@ -170,7 +170,7 @@ pip install -r requirements.txt
 Create a **.env** file in the project root:
 
 ```dotenv
-# NCBI (Required for PubMed search)
+# Required: NCBI API key for PubMed search
 NCBI_API_KEY="your_ncbi_api_key_here"
 
 # LLM: Choose ONE backend (or provide multiple and choose in UI)
@@ -182,9 +182,6 @@ GEMINI_API_KEY="your_gemini_api_key_here"
 # OR
 # ANTHROPIC_API_KEY="your_anthropic_api_key_here"
 
-# Required: NCBI API key for reliable operation
-NCBI_API_KEY="your_ncbi_api_key_here"
-
 # Optional: Rate limiting (adjust if you hit quotas)
 GEMINI_RPM=10
 GEMINI_TPM=180000
@@ -192,6 +189,11 @@ PAPER_PAUSE_SEC=3.0
 
 # Optional: Contact info for NCBI
 CONTACT_EMAIL="your_email@example.com"
+
+# Optional: Custom LLM endpoint (for hackathon/proxy setups)
+# CUSTOM_LLM_URL="http://localhost:8080/v1/completions"
+# CUSTOM_LLM_MODEL="gpt4o"
+# CUSTOM_LLM_TIMEOUT=120
 ```
 
 > **Note**: 
@@ -236,8 +238,15 @@ cp env.example .env
 ```
 
 **Required API Keys:**
-- **GEMINI_API_KEY**: Get from [Google AI Studio](https://aistudio.google.com/)
 - **NCBI_API_KEY**: Get from [NCBI API Key Registration](https://www.ncbi.nlm.nih.gov/account/settings/)
+- **LLM API Key** (choose one or provide multiple and select in UI):
+  - **GEMINI_API_KEY**: Get from [Google AI Studio](https://aistudio.google.com/)
+  - **GROQ_API_KEY**: Get from [Groq Console](https://console.groq.com/keys)
+  - **OPENAI_API_KEY**: Get from [OpenAI API Keys](https://platform.openai.com/api-keys)
+  - **ANTHROPIC_API_KEY**: Get from [Anthropic Console](https://console.anthropic.com/settings/keys)
+  - **CUSTOM_LLM_URL**: For custom/hackathon endpoints
+
+**Note:** All environment variables from `.env` are automatically loaded. The Docker setup supports all LLM backends.
 
 ### Step 3: Run with Docker Compose
 ```bash
@@ -249,7 +258,7 @@ docker-compose up -d --build
 ```
 
 ### Step 4: Access the application
-- Open your browser to: `http://localhost:8502`
+- Open your browser to: `http://localhost:8501`
 - The app will be running in a containerized environment
 
 ### Step 5: Stop the application
@@ -268,7 +277,7 @@ docker-compose down -v
 docker build -t pubmed-miner .
 
 # Run the container
-docker run -p 8502:8501 --env-file .env pubmed-miner
+docker run -p 8501:8501 --env-file .env pubmed-miner
 
 # View logs
 docker-compose logs -f
@@ -286,6 +295,8 @@ docker-compose down -v --rmi all
 - ✅ **Easy deployment** and scaling
 - ✅ **Isolated dependencies**
 - ✅ **Production-ready** setup
+- ✅ **All LLM backends supported** (Gemini, OpenAI, Anthropic, Groq, Custom)
+- ✅ **Health checks** enabled for monitoring
 
 ---
 
@@ -300,10 +311,17 @@ Pubmed_Miner/
 ├── llm/                         # LLM backends module
 │   ├── __init__.py              # Package initialization
 │   ├── gemini.py                # Google Gemini integration
-│   └── groq.py                  # Groq API integration
+│   ├── groq.py                  # Groq API integration
+│   ├── openai.py                # OpenAI API integration
+│   ├── anthropic.py             # Anthropic API integration
+│   ├── custom.py                # Custom LLM endpoint
+│   ├── prompts.py               # Prompt templates
+│   ├── utils.py                 # Shared utilities
+│   └── unified.py               # Unified LLM interface
 ├── pipeline/                    # Batch processing module
 │   ├── __init__.py              # Package initialization
-│   └── batch_analyze.py         # Batch fetch + LLM analysis
+│   ├── batch_analyze.py         # Batch fetch + LLM analysis
+│   └── csv_export.py            # CSV export utilities
 ├── services/                    # External API services
 │   ├── __init__.py              # Package initialization
 │   ├── pmc.py                   # PMC full-text fetching
@@ -322,9 +340,14 @@ Pubmed_Miner/
 - Handles user interactions and data visualization
 
 **`llm/`** - Language Model Integration  
-- `gemini.py`: Google Gemini API integration for mutation extraction
-- `groq.py`: Groq API integration (alternative backend)
-- Both provide identical APIs: `run_on_paper()`, `clean_and_ground()`
+- `gemini.py`: Google Gemini API integration
+- `groq.py`: Groq API integration (Llama models)
+- `openai.py`: OpenAI API integration (GPT-4o)
+- `anthropic.py`: Anthropic API integration (Claude)
+- `custom.py`: Custom/backend-agnostic LLM endpoint
+- `prompts.py`: Prompt templates and pattern descriptions
+- `utils.py`: Shared utilities for all backends
+- All backends provide identical APIs: `run_on_paper()`, `clean_and_ground()`
 
 **`pipeline/`** - Batch Processing
 - `batch_analyze.py`: Orchestrates PMC fetching + LLM analysis
@@ -340,9 +363,13 @@ Pubmed_Miner/
 # UI imports
 from app.app import main
 
-# LLM backends
+# LLM backends (all provide identical APIs)
 from llm.gemini import run_on_paper, clean_and_ground
 from llm.groq import run_on_paper, clean_and_ground
+from llm.openai import run_on_paper, clean_and_ground
+from llm.anthropic import run_on_paper, clean_and_ground
+from llm.custom import run_on_paper, clean_and_ground
+from llm.unified import run_on_paper, clean_and_ground  # Unified interface
 
 # Services
 from services.pmc import get_pmc_fulltext_with_meta, get_last_fetch_source
@@ -350,11 +377,8 @@ from services.pubmed import esearch_reviews, esummary
 
 # Pipeline
 from pipeline.batch_analyze import fetch_all_fulltexts, analyze_texts
+from pipeline.csv_export import flatten_to_rows
 ```
-
-Notes:
-- Backwards compatibility is preserved. Existing imports like `from extractor import get_pmc_fulltext_with_meta` still work.
-- New code should import from `llm.gemini` or `llm.groq` and `services.pmc` directly.
 
 ---
 
@@ -375,8 +399,48 @@ This will search for Dengue-related protein review literature mentioning an acti
 1. **Search PubMed** – Enter your query and press search.
 2. **Select PMIDs** – Choose papers to include in analysis.
 3. **Fetch Full Text** – The app tries to pull **PMC** full text (if available).
-4. **Run Extraction** – Use the Gemini-based pipeline to enumerate tokens and attribute them with short, grounded quotes.
+4. **Run Extraction** – Use the LLM-based pipeline to extract mutations, proteins, and structural features with grounded quotes.
 5. **Review & Export** – Inspect results in the UI; download CSV/JSON as needed.
+
+---
+
+## 📝 Customizing the Extraction Prompt
+
+Edit the extraction prompt in the web UI to customize what features are extracted.
+
+### Quick Start
+
+1. Expand **"📝 Edit Extraction Prompt"** in the web UI
+2. Edit the `PATTERN RECOGNITION GUIDE` to add/modify pattern descriptions
+3. Edit the `INSTRUCTIONS` to change extraction priorities
+4. Click **"💾 Save Changes"** and test on a sample paper
+
+### What You Can Edit
+
+- **PATTERN RECOGNITION GUIDE**: Mutation formats, protein patterns, residue patterns, domain patterns
+- **INSTRUCTIONS**: Extraction priorities, coverage requirements, filtering criteria
+- **SYSTEM / INSTRUCTION**: AI extractor role and identity
+- **DEFINITIONS**: Feature types and definitions
+
+**Locked** (for safety): JSON schema, output format, few-shot examples
+
+### Tips
+
+- Add all mutation notation styles you encounter (`A226V`, `p.Ala226Val`, spelled mutations)
+- Include concrete examples in pattern descriptions
+- Test incrementally with small changes
+- Use "🔄 Reset to Default" if needed
+
+### Example
+
+To add arrow notation (`226A→V`), update the mutation patterns:
+
+```
+**Mutation Patterns:**
+• Standard: A226V, K128E
+• Arrow notation: 226A→V, 128K→E  ← Add this
+• HGVS: p.Ala226Val
+```
 
 ---
 
@@ -414,6 +478,13 @@ This will search for Dengue-related protein review literature mentioning an acti
 - Check console for error messages
 - Ensure all dependencies are installed
 
+**Docker-specific issues**
+- **Container won't start**: Check logs with `docker-compose logs -f`
+- **Health check fails**: Ensure the app is running (wait 40s for startup)
+- **Port already in use**: Change port mapping in `docker-compose.yml` (e.g., `"8502:8501"`)
+- **API keys not working**: Verify `.env` file is mounted and variables are set correctly
+- **Build fails**: Clear Docker cache: `docker-compose build --no-cache`
+
 ### System Requirements
 - **Python**: 3.11+ (tested with 3.11.8)
 - **RAM**: 4GB+ recommended
@@ -426,10 +497,11 @@ This will search for Dengue-related protein review literature mentioning an acti
 
 - The app focuses on **Review** articles and handles date filters and pagination.
 - Fetching relies on PMC availability; for non-PMC papers, full text may not be obtainable.
-- The extractor runs in two passes to improve grounding and precision.
+- The extractor uses prompt-based pattern recognition (no regex pre-scanning).
+- Multiple LLM backends are supported; choose based on your needs (speed, cost, accuracy).
 
 ---
 
 ## License
 
-MIT (update as you prefer).
+MIT.
