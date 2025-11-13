@@ -212,6 +212,62 @@ def esearch_reviews(query: str, *,
     return ids
 
 
+def esearch_all(query: str, *,
+                mindate: Optional[str],
+                maxdate: Optional[str],
+                sort: str = "relevance",
+                retmax: int = 200,
+                cap: int = 2000,
+                open_access_only: bool = False) -> List[str]:
+    """
+    Search PubMed for all article types (not just reviews) matching the query + date bounds.
+    Pages through results up to 'cap'.
+    If open_access_only=True, adds PMC Open Access filter to the query.
+    
+    Args:
+        query: Search query string
+        mindate: Minimum date in YYYY/MM format (e.g., "2020/01")
+        maxdate: Maximum date in YYYY/MM format (e.g., "2020/12")
+        sort: Sort order ("relevance" or "pub+date")
+        retmax: Results per page
+        cap: Maximum total results
+        open_access_only: If True, restrict to open access papers
+    
+    Note: Query is normalized to lowercase to avoid PubMed parser issues with uppercase + hyphens.
+    """
+    # Normalize query to lowercase to avoid PubMed parser issues with uppercase + hyphens
+    normalized_query = query.lower()
+    q = normalized_query
+    if open_access_only:
+        q = f"({q}) AND (pmc open access[filter])"
+    
+    ids: List[str] = []
+    retstart = 0
+    while True:
+        j = _safe_get_json(
+            f"{EUTILS}/esearch.fcgi",
+            _ncbi_params({
+                "db": "pubmed",
+                "term": q,
+                "retstart": str(retstart),
+                "retmax": str(retmax),
+                "sort": sort,
+                **({"datetype": "pdat"} if (mindate or maxdate) else {}),
+                **({"mindate": mindate} if mindate else {}),
+                **({"maxdate": maxdate} if maxdate else {}),
+            }),
+        )
+        page = j.get("esearchresult", {}).get("idlist", []) or []
+        if not page:
+            break
+        ids.extend(page)
+        retstart += len(page)
+        if len(ids) >= cap:
+            break
+        time.sleep(0.34)  # be nice to NCBI
+    return ids
+
+
 def esummary(pmids: List[str]) -> Dict[str, Dict]:
     """
     Get concise metadata (title, source, pubdate) for a list of PMIDs.

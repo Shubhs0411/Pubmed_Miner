@@ -11,7 +11,7 @@ from typing import Dict
 
 from services.pmc import get_last_fetch_source
 from services.pubmed import (
-    esearch_reviews, esummary, parse_pubdate_interval, overlaps
+    esearch_reviews, esearch_all, esummary, parse_pubdate_interval, overlaps
 )
 from pipeline.batch_analyze import fetch_all_fulltexts, analyze_texts
 from pipeline.csv_export import flatten_to_rows
@@ -47,8 +47,8 @@ def _bucketize_papers(papers_dict):
 def main():
     load_dotenv()
     st.set_page_config(page_title="PubMed → PMC → LLM (Batch Miner)", layout="wide")
-    st.title("🧪 PubMed Review Miner")
-    st.caption("Search review articles, fetch PMC full text, run your LLM extractor, and download findings.")
+    st.title("🧪 PubMed Miner")
+    st.caption("Search PubMed articles, fetch PMC full text, run your LLM extractor, and download findings.")
 
     # ===== Sidebar Configuration =====
     with st.sidebar:
@@ -79,6 +79,7 @@ def main():
                 try:
                     with st.spinner("Testing NCBI connection..."):
                         test_pmids = esearch_reviews("covid-19", mindate="2020/01/01", maxdate="2020/12/31", sort="relevance", cap=5)
+                        # Note: Test always uses reviews for consistency
                         if test_pmids:
                             st.success(f"✅ NCBI working! Found {len(test_pmids)} test results")
                         else:
@@ -368,13 +369,24 @@ def main():
             st.caption("💡 This is what the LLM receives. The editable section is embedded in the middle.")
 
     # ===== Search Section =====
-    st.subheader("1) Enter your PubMed query (reviews only)")
+    st.subheader("1) Enter your PubMed query")
     
     # Show NCBI API status in main area
     if not os.getenv("NCBI_API_KEY"):
         st.info("💡 **Tip:** Add your NCBI API key in the sidebar (👈) to increase rate limits from 3 to 10 requests/second.")
     
-    st.write("Paste a PubMed query (we'll restrict to **Review** articles automatically).")
+    # Toggle for review papers only
+    reviews_only = st.checkbox(
+        "🔍 Restrict to Review articles only",
+        value=True,
+        help="If checked, only search for Review articles. If unchecked, search all article types."
+    )
+    
+    if reviews_only:
+        st.write("Paste a PubMed query (will restrict to **Review** articles automatically).")
+    else:
+        st.write("Paste a PubMed query (will search **all article types**).")
+    
     query = st.text_area("Query", height=100, placeholder='e.g., dengue[MeSH Terms] AND mutation[Text Word]')
 
     st.subheader("2) Choose publication date range & search")
@@ -398,7 +410,8 @@ def main():
     with colD:
         cap = st.slider("Max records", 0, 500, 100, 100)
 
-    go = st.button("🔎 Search PubMed (reviews)")
+    search_button_text = "🔎 Search PubMed (reviews)" if reviews_only else "🔎 Search PubMed (all articles)"
+    go = st.button(search_button_text)
     if go:
         if not query.strip():
             st.warning("Please enter a query.")
@@ -429,8 +442,12 @@ def main():
                 st.stop()
             
             try:
-                with st.spinner("Searching PubMed (reviews)…"):
-                    pmids = esearch_reviews(query.strip(), mindate=mindate_formatted, maxdate=maxdate_formatted, sort=sort, cap=cap)
+                search_type = "reviews" if reviews_only else "all articles"
+                with st.spinner(f"Searching PubMed ({search_type})…"):
+                    if reviews_only:
+                        pmids = esearch_reviews(query.strip(), mindate=mindate_formatted, maxdate=maxdate_formatted, sort=sort, cap=cap)
+                    else:
+                        pmids = esearch_all(query.strip(), mindate=mindate_formatted, maxdate=maxdate_formatted, sort=sort, cap=cap)
                     
                     if not pmids:
                         st.warning(f"❌ **No results found for your query.**\n\n"
