@@ -1,4 +1,3 @@
-# services/pubmed.py
 from __future__ import annotations
 
 import os
@@ -14,6 +13,12 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+
+
+import google.generativeai as genai
+import requests
+from urllib.parse import quote
+
 
 # -------------------- Robust HTTP session + tolerant JSON --------------------
 _SESSION = requests.Session()
@@ -32,6 +37,43 @@ _DEFAULT_HEADERS = {
     "User-Agent": "pmid_fulltext_tool/1.0 (contact: you@example.com)",
     "Accept": "application/json",
 }
+
+################################## Natural Language Query Converter ##################################
+
+import google.generativeai as genai
+
+# Must be configured before calling
+def natural_query_to_pubmed_query(user_input: str) -> str:
+
+    # ---------------------------
+    # 1. Configure Gemini
+    # ---------------------------
+    GEMINI_API_KEY = "AIzaSyCWhjLsgZgP0UIXCGWKtbOz5C_X5juj2EI"   # <<< Replace this
+    genai.configure(api_key=GEMINI_API_KEY)
+
+    prompt = f"""Your task is to convert the natural-language text into a precise PubMed Boolean
+query. You must follow a two-step process:
+
+STEP 1 — Extract structured search concepts:
+- ENTITY: A virus or protein term that must appear in the title.
+- GENERAL ENTITY: A related biological entity if present.
+- MECHANISTIC TERMS: Functional sequence- or protein-related concepts.
+
+STEP 2 — Build the PubMed Boolean query:
+- ENTITY must use the [Title] tag.
+- GENERAL ENTITY, if present, must be untagged.
+- All MECHANISTIC TERMS must end with [Text Word].
+- Final structure:
+  ((ENTITY [Title]) AND (GENERAL ENTITY)) AND ((TERM1[Text Word]) OR (TERM2[Text Word]) ...)
+- Output ONLY the PubMed query, nothing else.
+
+NATURAL LANGUAGE INPUT:
+{user_input}
+"""
+    model = genai.GenerativeModel("gemini-2.5-flash")
+    response = model.generate_content(prompt)
+    return response.text.strip()
+
 
 
 def _safe_get_json(url: str, params: dict, *, tries: int = 3, sleep_s: float = 0.7) -> dict:
