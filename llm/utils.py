@@ -146,71 +146,80 @@ def extract_spelled_mutation(text: str) -> Optional[Tuple[str, str]]:
 
 
 def scan_text_candidates(text: str) -> Dict[str, List[str]]:
-    """Pre-scan for candidate mentions to guide LLM."""
-    if not isinstance(text, str):
-        return {}
+    """
+    Pre-scan for candidate mentions to guide LLM.
     
-    candidates: Dict[str, Set[str]] = {
-        "mutation_tokens": set(),
-        "hgvs_tokens": set(),
-        "protein_terms": set(),
-        "residue_numbers": set(),
-        "motif_candidates": set(),
-        "amino_acid_mentions": set(),
-    }
+    DISABLED: Returns empty dict to let LLM extract without regex hints.
+    Uncomment the code below to re-enable regex-based candidate scanning.
+    """
+    # DISABLED - Returning empty dict so LLM works without regex hints
+    return {}
     
-    for m in MUT_TOKEN_RE.finditer(text):
-        candidates["mutation_tokens"].add(m.group(0))
-    
-    for m in HGVS_RE.finditer(text):
-        candidates["hgvs_tokens"].add(m.group(0))
-    
-    for m in PROTEIN_RE.finditer(text):
-        term = f"{m.group(1)} {m.group(2)}"
-        candidates["protein_terms"].add(term)
-    
-    for m in RESIDUE_RE.finditer(text):
-        candidates["residue_numbers"].add(m.group(1))
-    
-    for m in RANGE_RE.finditer(text):
-        candidates["residue_numbers"].add(f"{m.group(1)}-{m.group(2)}")
-    
-    for m in RANGE_WORD_RE.finditer(text):
-        candidates["residue_numbers"].add(f"{m.group(1)}-{m.group(2)}")
-    
-    for m in COUNT_RE.finditer(text):
-        candidates["residue_numbers"].add(m.group(1))
-    
-    for m in MOTIF_RE.finditer(text):
-        token = m.group(0)
-        if len(token) >= 3:
-            candidates["motif_candidates"].add(token)
-    
-    for m in AA_SINGLE_RE.finditer(text):
-        aa = m.group(1).upper()
-        pos = m.group("pos")
-        candidates["amino_acid_mentions"].add(f"{aa}{pos}")
-    
-    for m in AA_WORD_POS_RE.finditer(text):
-        name = m.group("name")
-        pos = m.group("pos")
-        codes = lookup_aa_codes(name)
-        if codes:
-            one_letter, three_letter = codes
-            candidates["amino_acid_mentions"].add(f"{three_letter}{pos}")
-            candidates["amino_acid_mentions"].add(f"{one_letter}{pos}")
-
-    def _trim(seq: Set[str], limit: int = 200) -> List[str]:
-        return sorted(seq)[:limit] if seq else []
-
-    return {
-        "mutation_tokens": _trim(candidates["mutation_tokens"]),
-        "hgvs_tokens": _trim(candidates["hgvs_tokens"]),
-        "protein_terms": _trim(candidates["protein_terms"]),
-        "residue_numbers": _trim(candidates["residue_numbers"]),
-        "motif_candidates": _trim(candidates["motif_candidates"]),
-        "amino_acid_mentions": _trim(candidates["amino_acid_mentions"]),
-    }
+    # ========== COMMENTED OUT - REGEX-BASED HINT GENERATION ==========
+    # if not isinstance(text, str):
+    #     return {}
+    # 
+    # candidates: Dict[str, Set[str]] = {
+    #     "mutation_tokens": set(),
+    #     "hgvs_tokens": set(),
+    #     "protein_terms": set(),
+    #     "residue_numbers": set(),
+    #     "motif_candidates": set(),
+    #     "amino_acid_mentions": set(),
+    # }
+    # 
+    # for m in MUT_TOKEN_RE.finditer(text):
+    #     candidates["mutation_tokens"].add(m.group(0))
+    # 
+    # for m in HGVS_RE.finditer(text):
+    #     candidates["hgvs_tokens"].add(m.group(0))
+    # 
+    # for m in PROTEIN_RE.finditer(text):
+    #     term = f"{m.group(1)} {m.group(2)}"
+    #     candidates["protein_terms"].add(term)
+    # 
+    # for m in RESIDUE_RE.finditer(text):
+    #     candidates["residue_numbers"].add(m.group(1))
+    # 
+    # for m in RANGE_RE.finditer(text):
+    #     candidates["residue_numbers"].add(f"{m.group(1)}-{m.group(2)}")
+    # 
+    # for m in RANGE_WORD_RE.finditer(text):
+    #     candidates["residue_numbers"].add(f"{m.group(1)}-{m.group(2)}")
+    # 
+    # for m in COUNT_RE.finditer(text):
+    #     candidates["residue_numbers"].add(m.group(1))
+    # 
+    # for m in MOTIF_RE.finditer(text):
+    #     token = m.group(0)
+    #     if len(token) >= 3:
+    #         candidates["motif_candidates"].add(token)
+    # 
+    # for m in AA_SINGLE_RE.finditer(text):
+    #     aa = m.group(1).upper()
+    #     pos = m.group("pos")
+    #     candidates["amino_acid_mentions"].add(f"{aa}{pos}")
+    # 
+    # for m in AA_WORD_POS_RE.finditer(text):
+    #     name = m.group("name")
+    #     pos = m.group("pos")
+    #     codes = lookup_aa_codes(name)
+    #     if codes:
+    #         one_letter, three_letter = codes
+    #         candidates["amino_acid_mentions"].add(f"{three_letter}{pos}")
+    #         candidates["amino_acid_mentions"].add(f"{one_letter}{pos}")
+    # 
+    # def _trim(seq: Set[str], limit: int = 200) -> List[str]:
+    #     return sorted(seq)[:limit] if seq else []
+    # 
+    # return {
+    #     "mutation_tokens": _trim(candidates["mutation_tokens"]),
+    #     "hgvs_tokens": _trim(candidates["hgvs_tokens"]),
+    #     "protein_terms": _trim(candidates["protein_terms"]),
+    #     "residue_numbers": _trim(candidates["residue_numbers"]),
+    #     "motif_candidates": _trim(candidates["motif_candidates"]),
+    #     "amino_acid_mentions": _trim(candidates["amino_acid_mentions"]),
+    # }
 
 
 def token_context_windows(full_text: str,
@@ -520,12 +529,14 @@ def pass2_prompt(full_text: str,
     else:
         body = template + ("\n\nTEXT\n" + payload if payload else "")
 
-    if scan_candidates:
-        hints = {k: v for k, v in scan_candidates.items() if v}
-        if hints:
-            hints_json = json.dumps(hints, ensure_ascii=False)
-            body += ("\n\nKNOWN_MENTIONS (use internally to ensure coverage; do not list separately):\n"
-                     f"{hints_json}")
+    # DISABLED: Regex-based hints section - LLM will extract without prior hints
+    # Uncomment below to re-enable KNOWN_MENTIONS hints in the prompt
+    # if scan_candidates:
+    #     hints = {k: v for k, v in scan_candidates.items() if v}
+    #     if hints:
+    #         hints_json = json.dumps(hints, ensure_ascii=False)
+    #         body += ("\n\nKNOWN_MENTIONS (use internally to ensure coverage; do not list separately):\n"
+    #                  f"{hints_json}")
 
     if wrapper:
         return f"{wrapper}\n\n{body}"

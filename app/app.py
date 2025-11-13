@@ -263,27 +263,70 @@ def main():
         st.caption("💡 Tip: Test with 1-2 papers first to verify API keys work")
 
     # ===== Prompt Editor Section =====
-    with st.expander("📝 **Edit Extraction Prompt (Bioinformaticians)**", expanded=False):
+    with st.expander("📝 **Edit Extraction Prompt**", expanded=False):
         st.markdown("""
-        ### Simple Guide to Editing the Prompt
+        ### Quick Start
         
-        **What you can edit:**
-        - **SYSTEM / INSTRUCTION**: Change the role/identity of the AI (e.g., specialize for different viruses)
-        - **DEFINITIONS**: Add or modify feature types to extract (domains, mutations, motifs, etc.)
-        - **INSTRUCTIONS**: Adjust extraction behavior and guidelines (appears after examples in the full prompt)
+        1. **Edit the prompt sections** below to customize what features are extracted
+        2. **Modify PATTERN RECOGNITION GUIDE** to add/modify pattern descriptions (mutations, proteins, domains, etc.)
+        3. **Modify INSTRUCTIONS** to change extraction priorities and behaviors
+        4. Click **"💾 Save Changes"** and test on a sample paper
         
-        **What is locked (cannot edit):**
-        - JSON format requirements (ensures app works correctly)
-        - Output rules and schema (prevents breaking changes)
+        ---
+        
+        ### What You Can Edit
+        
+        **PATTERN RECOGNITION GUIDE** (in editable section):
+        - **Mutation Patterns**: Add mutation formats you encounter (e.g., `A226V`, `p.Ala226Val`, spelled mutations, arrow notation)
+        - **Protein Patterns**: Modify how proteins are identified (names, abbreviations, complexes)
+        - **Residue Number Patterns**: Adjust residue range detection patterns
+        - **Amino Acid Position Patterns**: Customize position notation recognition
+        - **Structural Domain Patterns**: Add domain/region pattern descriptions
+        - **Motif Patterns**: Modify motif detection patterns
+        - **Coverage Strategy**: Adjust how the LLM scans and extracts patterns
+        
+        **INSTRUCTIONS** (in editable section):
+        - Extraction priorities and coverage requirements
+        - Filtering criteria and quality thresholds
+        - Mutation format conversion rules
+        - Domain extraction requirements
+        
+        **SYSTEM / INSTRUCTION** (in editable section):
+        - AI extractor role and identity
+        - Specialization for different viruses or domains
+        
+        **DEFINITIONS** (in editable section):
+        - Feature types and their definitions
+        - Add new feature types (e.g., "• **NEW_FEATURE** (description)")
+        
+        **Locked** (for safety - cannot edit):
+        - JSON schema and output format (ensures app works correctly)
+        - Output rules (prevents breaking changes)
         - Few-shot examples (maintains consistency)
         - The `{TEXT}` placeholder (required for paper content)
         
-        **Tips:**
-        - You can add new feature types in DEFINITIONS (e.g., "• **NEW_FEATURE** (description)")
-        - Modify INSTRUCTIONS to change extraction priorities or behaviors
-        - The full prompt structure is: Header → SYSTEM/DEFINITIONS → Output Rules → Schema → Examples → INSTRUCTIONS → Text
+        ---
+        
+        ### Tips
+        
+        - **Add all mutation notation styles** you encounter (`A226V`, `p.Ala226Val`, spelled mutations, arrow notation like `226A→V`)
+        - **Include concrete examples** in pattern descriptions (e.g., "Arrow notation: 226A→V, 128K→E")
+        - **Test incrementally** with small changes to see the impact
+        - **Use "🔄 Reset to Default"** if something goes wrong
         - Changes take effect immediately for the next extraction
-        - Use "Reset to Default" if something goes wrong
+        
+        ---
+        
+        ### Example
+        
+        To add arrow notation (`226A→V`), update the mutation patterns in the **PATTERN RECOGNITION GUIDE** section:
+        
+        ```
+        **Mutation Patterns:**
+        • Standard: A226V, K128E
+        • Arrow notation: 226A→V, 128K→E  ← Add this line
+        • HGVS: p.Ala226Val
+        ```
         """)
         
         # Load current editable section
@@ -293,8 +336,8 @@ def main():
         edited_section = st.text_area(
             "Editable Prompt Section",
             value=current_editable,
-            height=400,
-            help="Edit the SYSTEM/INSTRUCTION, DEFINITIONS, and INSTRUCTIONS sections. Other parts are locked for safety."
+            height=500,
+            help="This section contains: SYSTEM/INSTRUCTION, DEFINITIONS, PATTERN RECOGNITION GUIDE, and INSTRUCTIONS. Edit these to customize extraction behavior. JSON schema, output rules, and examples are locked for safety."
         )
         
         col1, col2, col3 = st.columns([1, 1, 3])

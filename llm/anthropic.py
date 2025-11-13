@@ -119,62 +119,66 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         if delay_ms:
             time.sleep(delay_ms / 1000.0)
 
-    # Targeted follow-up for missed mutations
-    extracted_tokens = utils.collect_extracted_tokens([f for f in all_features if isinstance(f, dict)])
-    mutation_candidates = scan_candidates.get("mutation_tokens", []) if isinstance(scan_candidates, dict) else []
-    hgvs_candidates = scan_candidates.get("hgvs_tokens", []) if isinstance(scan_candidates, dict) else []
+    # DISABLED: Targeted follow-up for missed mutations (regex-based)
+    # This section used regex-found tokens to do a second pass extraction.
+    # Disabled to let LLM extract purely from the prompt without regex hints.
     
-    followup_tokens: List[str] = []
-    for token in mutation_candidates + hgvs_candidates:
-        if token and token not in extracted_tokens:
-            followup_tokens.append(token)
-    
-    # Deduplicate
-    deduped_follow = []
-    seen_follow: set = set()
-    for token in followup_tokens:
-        if token not in seen_follow:
-            seen_follow.add(token)
-            deduped_follow.append(token)
-    followup_tokens = deduped_follow
-
-    # Process missed mutations
-    for token in followup_tokens[:15]:
-        context = utils.token_context_windows(
-            text_norm, token, left=900, right=900, max_windows=4
-        )
-        hints = {"mutation_tokens": [token]}
-        prompt_focus = utils.pass2_prompt(
-            context, target_token=token, pmid=pmid, pmcid=pmcid, 
-            token_type="mutation", scan_candidates=hints
-        )
-        
-        try:
-            raw_focus = _anthropic_complete(prompt_focus, api_key, model_name, max_output_tokens=2048)
-            parsed_focus = utils.safe_json_value(raw_focus)
-            
-            focus_feats: List[Dict[str, Any]] = []
-            if isinstance(parsed_focus, dict) and isinstance(parsed_focus.get("sequence_features"), list):
-                focus_feats = parsed_focus["sequence_features"]
-            elif isinstance(parsed_focus, list):
-                focus_feats = parsed_focus
-            
-            normalized_focus: List[Dict[str, Any]] = []
-            for feat in focus_feats:
-                if isinstance(feat, dict):
-                    norm_feat = utils.normalize_prompt_feature(feat)
-                    if norm_feat:
-                        normalized_focus.append(norm_feat)
-            
-            if normalized_focus:
-                all_features.extend(normalized_focus)
-                extracted_tokens.update(utils.collect_extracted_tokens(normalized_focus))
-        except Exception as e:
-            print(f"[Claude] Error on followup token {token}: {e}")
-            continue
-        
-        if delay_ms:
-            time.sleep(delay_ms / 1000.0)
+    # ========== COMMENTED OUT - REGEX-BASED FOLLOW-UP EXTRACTION ==========
+    # extracted_tokens = utils.collect_extracted_tokens([f for f in all_features if isinstance(f, dict)])
+    # mutation_candidates = scan_candidates.get("mutation_tokens", []) if isinstance(scan_candidates, dict) else []
+    # hgvs_candidates = scan_candidates.get("hgvs_tokens", []) if isinstance(scan_candidates, dict) else []
+    # 
+    # followup_tokens: List[str] = []
+    # for token in mutation_candidates + hgvs_candidates:
+    #     if token and token not in extracted_tokens:
+    #         followup_tokens.append(token)
+    # 
+    # # Deduplicate
+    # deduped_follow = []
+    # seen_follow: set = set()
+    # for token in followup_tokens:
+    #     if token not in seen_follow:
+    #         seen_follow.add(token)
+    #         deduped_follow.append(token)
+    # followup_tokens = deduped_follow
+    # 
+    # # Process missed mutations
+    # for token in followup_tokens[:15]:
+    #     context = utils.token_context_windows(
+    #         text_norm, token, left=900, right=900, max_windows=4
+    #     )
+    #     hints = {"mutation_tokens": [token]}
+    #     prompt_focus = utils.pass2_prompt(
+    #         context, target_token=token, pmid=pmid, pmcid=pmcid, 
+    #         token_type="mutation", scan_candidates=hints
+    #     )
+    #     
+    #     try:
+    #         raw_focus = _anthropic_complete(prompt_focus, api_key, model_name, max_output_tokens=2048)
+    #         parsed_focus = utils.safe_json_value(raw_focus)
+    #         
+    #         focus_feats: List[Dict[str, Any]] = []
+    #         if isinstance(parsed_focus, dict) and isinstance(parsed_focus.get("sequence_features"), list):
+    #             focus_feats = parsed_focus["sequence_features"]
+    #         elif isinstance(parsed_focus, list):
+    #             focus_feats = parsed_focus
+    #         
+    #         normalized_focus: List[Dict[str, Any]] = []
+    #         for feat in focus_feats:
+    #             if isinstance(feat, dict):
+    #                 norm_feat = utils.normalize_prompt_feature(feat)
+    #                 if norm_feat:
+    #                     normalized_focus.append(norm_feat)
+    #         
+    #         if normalized_focus:
+    #             all_features.extend(normalized_focus)
+    #             extracted_tokens.update(utils.collect_extracted_tokens(normalized_focus))
+    #     except Exception as e:
+    #         print(f"[Claude] Error on followup token {token}: {e}")
+    #         continue
+    #     
+    #     if delay_ms:
+    #         time.sleep(delay_ms / 1000.0)
 
     # Deduplicate at JSON-schema level
     def _k(f):
