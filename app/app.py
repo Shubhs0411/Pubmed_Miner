@@ -13,7 +13,8 @@ from services.pmc import get_last_fetch_source
 from services.pubmed import (
     esearch_reviews, esummary, parse_pubdate_interval, overlaps
 )
-from pipeline.batch_analyze import fetch_all_fulltexts, analyze_texts, flatten_to_rows
+from pipeline.batch_analyze import fetch_all_fulltexts, analyze_texts
+from pipeline.csv_export import flatten_to_rows
 
 # Import prompts for editing
 from llm.prompts import PROMPTS
@@ -680,6 +681,9 @@ def main():
             llm_meta["timeout"] = custom_timeout
             if custom_headers_dict:
                 llm_meta["extra_headers"] = custom_headers_dict
+            # Auto-detect OpenAI-compatible endpoints
+            if custom_api_url and ("/v1" in custom_api_url or "/openai" in custom_api_url.lower()):
+                llm_meta["openai_compatible"] = True
 
         total = len(ok_pmids_this_run)
         for i, pmid in enumerate(ok_pmids_this_run, start=1):

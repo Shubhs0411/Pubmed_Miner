@@ -15,6 +15,14 @@ from llm import utils
 DEFAULT_MODEL = os.getenv("CUSTOM_LLM_MODEL", "custom-hackathon-model")
 DEFAULT_URL = os.getenv("CUSTOM_LLM_URL", "")
 DEFAULT_TIMEOUT = int(os.getenv("CUSTOM_LLM_TIMEOUT", "120"))
+DEFAULT_MAX_TOKENS = int(os.getenv("CUSTOM_LLM_MAX_TOKENS", "8192"))
+DEFAULT_TEMPERATURE = float(os.getenv("CUSTOM_LLM_TEMPERATURE", "0.0"))
+DEFAULT_OPENAI_COMPATIBLE = os.getenv(
+    "CUSTOM_LLM_OPENAI_COMPATIBLE", ""
+).strip().lower() in {"1", "true", "yes", "on"}
+DEFAULT_OPENAI_CHAT_MODE = os.getenv(
+    "CUSTOM_LLM_CHAT_MODE", ""
+).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _custom_complete(
@@ -25,6 +33,10 @@ def _custom_complete(
     extra_headers: Optional[Dict[str, str]] = None,
     model_name: Optional[str] = None,
     timeout: int = DEFAULT_TIMEOUT,
+    openai_compatible: bool = False,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    chat_mode: bool = False,
 ) -> str:
     """Generic HTTP handler for custom LLM endpoints.
 
@@ -45,14 +57,91 @@ def _custom_complete(
     if extra_headers:
         headers.update(extra_headers)
 
-    payload: Dict[str, Any] = {"prompt": prompt}
-    if model_name:
-        payload["model"] = model_name
+    request_url = api_url.rstrip("/")
 
-    resp = requests.post(api_url, headers=headers, json=payload, timeout=timeout)
-    resp.raise_for_status()
+    def _maybe_apply_params(payload: Dict[str, Any]) -> None:
+        if max_tokens and max_tokens > 0:
+            payload["max_tokens"] = max_tokens
+        if temperature is not None:
+            payload["temperature"] = temperature
+
+    if openai_compatible:
+        base_url = request_url
+        last_error: Optional[Exception] = None
+
+        # Ordering: try /completions (prompt) first, then /chat/completions if needed or requested
+        attempt_chat = chat_mode
+        endpoints: List[Dict[str, Any]] = []
+
+        if not attempt_chat:
+            # prefer completions first
+            if base_url.endswith("/v1"):
+                endpoints.append({"url": f"{base_url}/completions", "mode": "completion"})
+            elif base_url.endswith("/completions"):
+                endpoints.append({"url": base_url, "mode": "completion"})
+            else:
+                endpoints.append({"url": base_url, "mode": "completion"})
+                endpoints.append({"url": f"{base_url}/completions", "mode": "completion"})
+            # allow chat as fallback
+            endpoints.append({"url": f"{base_url}/chat/completions", "mode": "chat"})
+        else:
+            # Chat first if chat_mode requested
+            if base_url.endswith("/v1"):
+                endpoints.append({"url": f"{base_url}/chat/completions", "mode": "chat"})
+            elif base_url.endswith("/chat/completions"):
+                endpoints.append({"url": base_url, "mode": "chat"})
+            else:
+                endpoints.append({"url": base_url, "mode": "chat"})
+                endpoints.append({"url": f"{base_url}/chat/completions", "mode": "chat"})
+            # completions fallback
+            endpoints.append({"url": f"{base_url}/completions", "mode": "completion"})
+
+        for candidate in endpoints:
+            mode = candidate["mode"]
+            url = candidate["url"].rstrip("/")
+            try:
+                if mode == "completion":
+                    payload: Dict[str, Any] = {
+                        "model": model_name or DEFAULT_MODEL,
+                        "prompt": prompt,
+                    }
+                    _maybe_apply_params(payload)
+                else:
+                    payload = {
+                        "model": model_name or DEFAULT_MODEL,
+                        "messages": [{"role": "user", "content": prompt}],
+                    }
+                    _maybe_apply_params(payload)
+
+                resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+                resp.raise_for_status()
+                request_url = url  # track final used URL
+                break
+            except requests.exceptions.HTTPError as exc:
+                last_error = exc
+                status = exc.response.status_code if exc.response is not None else None
+                if status in {404, 405}:
+                    continue  # try next endpoint
+                raise
+            except Exception as exc:
+                last_error = exc
+                raise
+        else:
+            if last_error:
+                raise last_error
+            raise RuntimeError("Custom LLM: no valid OpenAI-compatible endpoint could be reached.")
+    else:
+        payload = {"prompt": prompt}
+        if model_name:
+            payload["model"] = model_name
+        _maybe_apply_params(payload)
+        resp = requests.post(request_url, headers=headers, json=payload, timeout=timeout)
+        resp.raise_for_status()
 
     data = resp.json()
+    
+    # Debug: log response structure
+    print(f"[CUSTOM LLM] API response keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}")
 
     # Flexible extraction of text from various response shapes
     text = (
@@ -69,10 +158,16 @@ def _custom_complete(
                 text = first_choice["text"]
             elif isinstance(first_choice.get("message"), dict):
                 text = first_choice["message"].get("content")
+    
+    # Debug: log what we extracted
+    if text:
+        print(f"[CUSTOM LLM] Extracted text length: {len(text)} chars, first 200: {text[:200]}")
+    else:
+        print(f"[CUSTOM LLM] WARNING: No text extracted. Full response structure: {str(data)[:500]}")
 
     if not isinstance(text, str) or not text.strip():
         raise RuntimeError(
-            "Custom LLM response is missing a usable completion field."
+            f"Custom LLM response is missing a usable completion field. Response keys: {list(data.keys()) if isinstance(data, dict) else 'not a dict'}"
         )
 
     return text.strip()
@@ -81,11 +176,49 @@ def _custom_complete(
 def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Run the custom LLM on the provided paper text using shared utilities."""
     meta = meta or {}
+    
+    # If custom prompt provided from frontend, use it (temporarily override)
+    custom_prompt = meta.get("analyst_prompt")
+    original_prompt = None
+    if custom_prompt:
+        from llm.prompts import PROMPTS
+        original_prompt = PROMPTS.analyst_prompt
+        PROMPTS.analyst_prompt = custom_prompt
 
     api_url = meta.get("api_url") or DEFAULT_URL
     api_key = meta.get("api_key") or os.getenv("CUSTOM_LLM_API_KEY", "")
     model_name = meta.get("model_name") or DEFAULT_MODEL
     timeout = int(meta.get("timeout") or DEFAULT_TIMEOUT)
+    raw_openai_flag = meta.get("openai_compatible")
+    if raw_openai_flag is None:
+        openai_compatible = DEFAULT_OPENAI_COMPATIBLE
+    elif isinstance(raw_openai_flag, str):
+        openai_compatible = raw_openai_flag.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    else:
+        openai_compatible = bool(raw_openai_flag)
+
+    # For custom LLM, don't limit tokens - let the API handle it
+    raw_max_tokens = meta.get("max_tokens")
+    if raw_max_tokens is None:
+        max_tokens = None  # No limit - send full paper
+    else:
+        try:
+            max_tokens = int(raw_max_tokens)
+            if max_tokens <= 0:
+                max_tokens = None
+        except (TypeError, ValueError):
+            max_tokens = None  # Default to no limit
+
+    temperature = meta.get("temperature", DEFAULT_TEMPERATURE)
+    try:
+        temperature = float(temperature) if temperature is not None else DEFAULT_TEMPERATURE
+    except (TypeError, ValueError):
+        temperature = DEFAULT_TEMPERATURE
 
     extra_headers: Dict[str, str] = {}
     raw_headers = meta.get("extra_headers") or os.getenv("CUSTOM_LLM_HEADERS", "")
@@ -99,31 +232,42 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
                 "CUSTOM_LLM_HEADERS is not valid JSON."
             ) from exc
 
+    chat_mode_flag = meta.get("chat_mode")
+    if chat_mode_flag is None:
+        chat_mode = DEFAULT_OPENAI_CHAT_MODE
+    elif isinstance(chat_mode_flag, str):
+        chat_mode = chat_mode_flag.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+    else:
+        chat_mode = bool(chat_mode_flag)
+
     pmid = meta.get("pmid")
     pmcid = meta.get("pmcid")
 
     text_norm = utils.normalize_ws(paper_text or "")
     scan_candidates = utils.scan_text_candidates(text_norm)
 
-    chunk_chars = int(meta.get("chunk_chars") or 100_000)
-    overlap_chars = int(meta.get("overlap_chars") or 2_000)
-    max_chunks = int(meta.get("max_chunks") or 4)
-    delay_ms = int(meta.get("delay_ms") or 0)
-
-    chunks = list(utils.chunk_text(text_norm, max_chars=chunk_chars, overlap=overlap_chars))
-    chunks = chunks[:max_chunks] if chunks else [text_norm]
-
+    # For custom LLM: send the FULL paper text in one request (no chunking)
+    # This ensures the LLM sees the complete context
     all_features: List[Any] = []
 
-    for idx, chunk in enumerate(chunks, 1):
+    try:
+        print(f"[CUSTOM LLM] Processing full paper text ({len(text_norm)} chars) in single request")
+        
         prompt2 = utils.pass2_prompt(
-            chunk,
+            text_norm,  # Full paper text, no chunking
             target_token="",
             pmid=pmid,
             pmcid=pmcid,
             token_type="paper",
             scan_candidates=scan_candidates,
         )
+
+        print(f"[CUSTOM LLM] Prompt length: {len(prompt2)} chars")
 
         raw = _custom_complete(
             prompt2,
@@ -132,25 +276,50 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
             extra_headers=extra_headers,
             model_name=model_name,
             timeout=timeout,
+            openai_compatible=openai_compatible,
+            max_tokens=max_tokens,  # None = no limit
+            temperature=temperature,
+            chat_mode=chat_mode,
         )
 
         parsed = utils.safe_json_value(raw)
+
+        # Debug: log response structure
+        if parsed is None:
+            print(
+                "[CUSTOM LLM] WARNING: Failed to parse JSON response. "
+                f"Raw response (first 500 chars): {raw[:500]}"
+            )
+        elif not isinstance(parsed, (dict, list)):
+            print(f"[CUSTOM LLM] WARNING: Parsed response is not dict/list: {type(parsed)}")
+
         if isinstance(parsed, dict) and isinstance(parsed.get("sequence_features"), list):
             feats = parsed["sequence_features"]
         elif isinstance(parsed, list):
             feats = parsed
         else:
             feats = []
+            if parsed is not None:
+                print(
+                    "[CUSTOM LLM] WARNING: Unexpected response structure. "
+                    f"Keys: {list(parsed.keys()) if isinstance(parsed, dict) else 'N/A'}"
+                )
+
+        print(f"[CUSTOM LLM] Extracted {len(feats)} raw features from full paper")
 
         normalized = [
             utils.normalize_prompt_feature(f)
             for f in feats
             if isinstance(f, dict)
         ]
-        all_features.extend([f for f in normalized if f])
 
-        if delay_ms:
-            time.sleep(delay_ms / 1000.0)
+        print(f"[CUSTOM LLM] Normalized to {len(normalized)} features")
+
+        all_features.extend([f for f in normalized if f])
+    finally:
+        if original_prompt is not None:
+            from llm.prompts import PROMPTS
+            PROMPTS.analyst_prompt = original_prompt
 
     # DISABLED: Targeted follow-up for missed mutations (regex-based)
     # This section used regex-found tokens to do a second pass extraction.
@@ -220,20 +389,29 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
     #     if delay_ms:
     #         time.sleep(delay_ms / 1000.0)
 
+    # Deduplicate at JSON-schema level (same logic as Gemini)
+    def _k(f):
+        if not isinstance(f, dict):
+            return ("", "", "", "", "")
+        feat = f.get("feature") or {}
+        positions = feat.get("residue_positions") or []
+        pos0 = positions[0] if positions else {}
+        return (
+            (f.get("virus") or "").lower(),
+            (f.get("protein") or "").lower(),
+            (feat.get("name_or_label") or "").lower(),
+            (feat.get("type") or "").lower(),
+            f"{pos0.get('start')}-{pos0.get('end')}",
+        )
+    
     seen = set()
     uniq = []
-    for feat in all_features:
-        if not isinstance(feat, dict):
+    for f in all_features:
+        k = _k(f)
+        if k in seen:
             continue
-        key = (
-            (feat.get("virus") or "").lower(),
-            (feat.get("protein") or "").lower(),
-            (feat.get("target_token") or "").lower(),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(feat)
+        seen.add(k)
+        uniq.append(f)
 
     raw_output = {
         "paper": {
