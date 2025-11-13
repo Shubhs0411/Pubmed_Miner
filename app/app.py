@@ -15,7 +15,7 @@ from services.pubmed import (
 )
 from pipeline.batch_analyze import fetch_all_fulltexts, analyze_texts
 from pipeline.csv_export import flatten_to_rows
-
+from services.pubmed import natural_query_to_pubmed_query
 # Import prompts for editing
 from llm.prompts import PROMPTS
 
@@ -369,11 +369,20 @@ def main():
             st.caption("💡 This is what the LLM receives. The editable section is embedded in the middle.")
 
     # ===== Search Section =====
-    st.subheader("1) Enter your PubMed query")
+    st.subheader("1) Enter your query")
     
     # Show NCBI API status in main area
     if not os.getenv("NCBI_API_KEY"):
         st.info("💡 **Tip:** Add your NCBI API key in the sidebar (👈) to increase rate limits from 3 to 10 requests/second.")
+    
+    # Query type selection
+    query_type = st.radio(
+        "Query Type",
+        ["Natural Language Query", "PubMed Query"],
+        index=0,
+        horizontal=True,
+        help="Choose 'Natural Language Query' to enter plain English, or 'PubMed Query' to enter a PubMed Boolean query directly."
+    )
     
     # Toggle for review papers only
     reviews_only = st.checkbox(
@@ -382,13 +391,21 @@ def main():
         help="If checked, only search for Review articles. If unchecked, search all article types."
     )
     
-    if reviews_only:
-        st.write("Paste a PubMed query (will restrict to **Review** articles automatically).")
+    # Set placeholder based on query type
+    if query_type == "Natural Language Query":
+        placeholder = 'e.g., dengue virus mutations in the E protein'
+        help_text = "Enter your search in plain English. The system will automatically convert it to a PubMed Boolean query. Examples: 'COVID-19 spike protein variants', 'influenza hemagglutinin mutations', 'dengue virus E protein structure'"
     else:
-        st.write("Paste a PubMed query (will search **all article types**).")
-    
-    query = st.text_area("Query", height=100, placeholder='e.g., dengue[MeSH Terms] AND mutation[Text Word]')
+        placeholder = 'e.g., (dengue[MeSH Terms] OR dengue virus[Title]) AND (mutation[Text Word] OR variant[Text Word])'
+        help_text = "Enter a PubMed Boolean query with field tags. Use AND, OR, NOT operators. Field tags: [Title], [MeSH Terms], [Text Word], [Abstract], etc."
 
+    query = st.text_area(
+        "Query", 
+        height=100, 
+        placeholder=placeholder,
+        help=help_text
+    )
+    
     st.subheader("2) Choose publication date range & search")
     colA, colB, colC, colD = st.columns([1, 1, 1, 1])
     with colA:
@@ -441,17 +458,36 @@ def main():
                 st.error(f"❌ Invalid date format: {e}. Please use MM/YYYY (e.g., 01/2020)")
                 st.stop()
             
+            ################################## Natural Language Query Converter ##################################
+            
+            raw_query = query.strip()
+            
+            # Convert natural language to PubMed query if Natural Language Query is selected
+            if query_type == "Natural Language Query":
+                with st.spinner("🔄 Converting natural-language query to PubMed Boolean query…"):
+                    try:
+                        # Pass LLM configuration from sidebar
+                        raw_query = natural_query_to_pubmed_query(
+                            raw_query
+                        )
+                        st.info(f"📘 Converted query:\n\n`{raw_query}`")
+                    except Exception as e:
+                        st.warning(f"⚠️ Query conversion failed, using raw query. Error: {e}")
+            # If PubMed Query is selected, use the query as-is (no conversion needed)
+            
+            ######################### End of Natural Language Query Converter ##################################
+            
             try:
                 search_type = "reviews" if reviews_only else "all articles"
                 with st.spinner(f"Searching PubMed ({search_type})…"):
                     if reviews_only:
-                        pmids = esearch_reviews(query.strip(), mindate=mindate_formatted, maxdate=maxdate_formatted, sort=sort, cap=cap)
+                        pmids = esearch_reviews(raw_query, mindate=mindate_formatted, maxdate=maxdate_formatted, sort=sort, cap=cap)
                     else:
-                        pmids = esearch_all(query.strip(), mindate=mindate_formatted, maxdate=maxdate_formatted, sort=sort, cap=cap)
+                        pmids = esearch_all(raw_query, mindate=mindate_formatted, maxdate=maxdate_formatted, sort=sort, cap=cap)
                     
                     if not pmids:
                         st.warning(f"❌ **No results found for your query.**\n\n"
-                                  f"**Your query:** `{query.strip()}`\n\n"
+                                  f"**Your query:** `{raw_query}`\n\n"
                                   f"**Tips:**\n"
                                   f"- Try broader search terms\n"
                                   f"- Check spelling\n"
