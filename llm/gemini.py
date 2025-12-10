@@ -180,6 +180,17 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
     chunks = chunks[:max_chunks] if chunks else [text_norm]
 
     all_features: List[Any] = []
+    raw_llm_responses: List[Any] = []  # Store truly raw LLM outputs before normalization
+    
+    # Check if we should capture raw responses
+    def _is_truthy(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+    
+    capture_raw = meta.get("debug_raw") or _is_truthy(os.getenv("SAVE_RAW_LLM"))
     
     # Process each chunk
     for idx, ch in enumerate(chunks, 1):
@@ -189,6 +200,15 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         )
         raw2 = _gemini_complete(prompt2, max_output_tokens=8192)
         j2 = utils.safe_json_value(raw2)
+        
+        # Store raw response before any normalization
+        if capture_raw:
+            raw_llm_responses.append({
+                "chunk": idx,
+                "total_chunks": len(chunks),
+                "raw_response": raw2,  # Raw string from LLM
+                "parsed_json": j2  # Parsed JSON (but not normalized)
+            })
 
         if isinstance(j2, dict) and isinstance(j2.get("sequence_features"), list):
             feats = j2["sequence_features"]
@@ -303,6 +323,10 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         require_mutation_in_quote=False,
         min_confidence=float(meta.get("min_confidence") or 0.0),
     )
+    
+    # Include raw LLM responses if debug mode is enabled
+    if capture_raw and raw_llm_responses:
+        cleaned["_raw_llm_responses"] = raw_llm_responses
     
     return cleaned
 

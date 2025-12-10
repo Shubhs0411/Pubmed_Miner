@@ -510,7 +510,6 @@ def pass2_prompt(full_text: str,
                   token_type: str,
                   scan_candidates: Optional[Dict[str, List[str]]] = None) -> str:
     """Build prompt using the analyst template."""
-    wrapper = (PROMPTS.chunking_wrapper or "").strip()
     payload = (full_text or "").strip()
 
     meta = []
@@ -538,8 +537,6 @@ def pass2_prompt(full_text: str,
     #         body += ("\n\nKNOWN_MENTIONS (use internally to ensure coverage; do not list separately):\n"
     #                  f"{hints_json}")
 
-    if wrapper:
-        return f"{wrapper}\n\n{body}"
     return body
 
 
@@ -562,23 +559,43 @@ def convert_bio_schema_feature(f: Dict[str, Any]) -> Dict[str, Any]:
     target_type = None
     target_token = None
 
-    def _apply_mutation(hgvs_value: str, short_value: Optional[str] = None):
+    def _apply_mutation(original_value: str, short_value: Optional[str] = None):
         nonlocal mutation, target_token, target_type
-        mutation = hgvs_value
-        target_token = short_value or hgvs_value
+        # Always use short format (A226V) for mutation field, never HGVS
+        # This ensures mutation matches what's typically in quotes (short format)
+        mutation = short_value or original_value
+        target_token = short_value or original_value
         target_type = "mutation"
 
     if variants and isinstance(variants, list):
         first_variant = variants[0]
         if isinstance(first_variant, str):
-            spelled = extract_spelled_mutation(first_variant)
-            if spelled:
-                hgvs_val, short_val = spelled
-                _apply_mutation(hgvs_val, short_val)
-            elif re.search(r"[A-Z][0-9]{1,5}[A-Z*]", first_variant):
+            # Check if it's already in standard format (A226V)
+            if re.search(r"^[A-Z]\d{1,5}[A-Z*]$", first_variant):
                 _apply_mutation(first_variant, first_variant)
+            # Check if it's HGVS format (p.Ala226Val) - convert to short
+            elif re.search(r"^p\.[A-Z][a-z]{2}\d{1,5}[A-Z][a-z]{2}$", first_variant):
+                hgvs_parts = re.match(r"p\.([A-Z][a-z]{2})(\d{1,5})([A-Z][a-z]{2})", first_variant)
+                if hgvs_parts:
+                    from_aa = AA_NAME_TO_CODES.get(hgvs_parts.group(1).lower())
+                    to_aa = AA_NAME_TO_CODES.get(hgvs_parts.group(3).lower())
+                    if from_aa and to_aa:
+                        short_format = f"{from_aa[0]}{hgvs_parts.group(2)}{to_aa[0]}"
+                        _apply_mutation(first_variant, short_format)
+                    else:
+                        _apply_mutation(first_variant, first_variant)
+                else:
+                    _apply_mutation(first_variant, first_variant)
             else:
-                _apply_mutation(first_variant, first_variant)
+                # Check if it's spelled mutation - convert to short format only
+                spelled = extract_spelled_mutation(first_variant)
+                if spelled:
+                    hgvs_val, short_val = spelled
+                    # Use short format (A226V), not HGVS (p.Ala226Val)
+                    _apply_mutation(first_variant, short_val)
+                else:
+                    # Keep original verbatim for other formats
+                    _apply_mutation(first_variant, first_variant)
     else:
         if isinstance(name, str) and re.search(r"[A-Z][0-9]{1,5}[A-Z*]", name):
             _apply_mutation(name, name)
@@ -643,24 +660,50 @@ def convert_bio_schema_feature(f: Dict[str, Any]) -> Dict[str, Any]:
         pass
 
     if not mutation:
+        # Extract mutation verbatim from quote/evidence text (prefer quote to preserve original format)
         search_texts: List[str] = []
-        if isinstance(name, str):
-            search_texts.append(name)
-        if isinstance(variants, list):
-            search_texts.extend([v for v in variants if isinstance(v, str)])
-        if out.get("effect_summary"):
-            search_texts.append(out["effect_summary"])
+        # Priority 1: Quote/evidence snippet (most verbatim - preserves original format)
         if snippet:
             search_texts.append(snippet)
         for extra in f.get("evidence_quotes") or []:
             if isinstance(extra, str):
                 search_texts.append(extra)
+        # Priority 2: Name or variants (from LLM output)
+        if isinstance(name, str):
+            search_texts.append(name)
+        if isinstance(variants, list):
+            search_texts.extend([v for v in variants if isinstance(v, str)])
+        # Priority 3: Effect summary
+        if out.get("effect_summary"):
+            search_texts.append(out["effect_summary"])
         
         for text in search_texts:
+            # First, try to find standard format (A226V) in the text - use verbatim
+            standard_match = re.search(r"\b([A-Z]\d{1,5}[A-Z*])\b", text)
+            if standard_match:
+                mut_text = standard_match.group(1)
+                _apply_mutation(mut_text, mut_text)
+                break
+            # Then try HGVS format (p.Ala226Val) - convert to short format (A226V)
+            hgvs_match = re.search(r"\b(p\.[A-Z][a-z]{2}\d{1,5}[A-Z][a-z]{2})\b", text)
+            if hgvs_match:
+                hgvs_text = hgvs_match.group(1)
+                # Extract short format from HGVS - mutation field uses short, quote keeps verbatim
+                hgvs_parts = re.match(r"p\.([A-Z][a-z]{2})(\d{1,5})([A-Z][a-z]{2})", hgvs_text)
+                if hgvs_parts:
+                    from_aa = AA_NAME_TO_CODES.get(hgvs_parts.group(1).lower())
+                    to_aa = AA_NAME_TO_CODES.get(hgvs_parts.group(3).lower())
+                    if from_aa and to_aa:
+                        short_format = f"{from_aa[0]}{hgvs_parts.group(2)}{to_aa[0]}"
+                        # Mutation field = short format (A226V), quote already has verbatim HGVS
+                        _apply_mutation(hgvs_text, short_format)
+                        break
+            # Finally, try spelled mutation - convert to short format (A226V)
             spelled = extract_spelled_mutation(text)
             if spelled:
                 hgvs_val, short_val = spelled
-                _apply_mutation(hgvs_val, short_val)
+                # Mutation field = short format (A226V), quote already has verbatim spelled text
+                _apply_mutation(text, short_val)
                 break
 
     out["mutation"] = mutation

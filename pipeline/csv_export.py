@@ -8,50 +8,6 @@ from typing import Dict, List, Set, Tuple
 
 import pandas as pd
 
-# Compile regex once for performance
-_STANDARD_MUT_RE = re.compile(r"^[A-Z]\d+[A-Z*]$")
-
-
-def _calculate_confidence(feature: dict, quote: str) -> float:
-    """
-    Calculate confidence weighted by column completeness.
-    Higher scores for more complete data.
-    """
-    score = 0.0
-    
-    # Evidence quote (most important indicator)
-    if quote:
-        score += 0.4
-    
-    # Position information
-    pos = feature.get("position")
-    if pos is not None:
-        try:
-            # Validate it's a real position
-            if isinstance(pos, int) or (isinstance(pos, str) and pos.strip().isdigit()):
-                score += 0.15
-        except Exception:
-            pass
-    
-    # Biological context
-    if feature.get("virus"):
-        score += 0.1
-    if feature.get("protein"):
-        score += 0.15
-    
-    # Mutation format quality (standard format like A226V)
-    mutation = (feature.get("mutation") or "").strip()
-    if mutation and _STANDARD_MUT_RE.match(mutation):
-        score += 0.1
-    
-    # Experimental context
-    ctx = feature.get("experiment_context") or {}
-    if any(ctx.get(k) for k in ("system", "assay", "temperature")):
-        score += 0.1
-    
-    return min(score, 1.0)
-
-
 def _normalize_mutation(mut: str) -> str:
     """Normalize mutation strings for deduplication."""
     if not mut:
@@ -110,7 +66,6 @@ def flatten_to_rows(batch: Dict[str, Dict]) -> pd.DataFrame:
     1. Deduplicates by (pmid, protein, mutation, position)
     2. Merges evidence quotes for same finding
     3. Keeps highest confidence when duplicates found
-    4. Filters by min_confidence AFTER scoring
     
     Columns:
       pmid, pmcid, title, virus, protein, mutation, position,
@@ -132,9 +87,9 @@ def flatten_to_rows(batch: Dict[str, Dict]) -> pd.DataFrame:
             quotes = [q for q in (f.get("evidence_quotes") or []) 
                      if isinstance(q, str) and q.strip()]
             
-            # Calculate confidence
+            # Use confidence from feature dict (already calculated in utils.py)
+            conf = float(f.get("confidence", 0.0))
             first_quote = quotes[0] if quotes else ""
-            conf = _calculate_confidence(f, first_quote)
             
             # Normalize position
             pos_val = f.get("position")

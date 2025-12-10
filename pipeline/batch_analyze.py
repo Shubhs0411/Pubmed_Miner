@@ -88,7 +88,7 @@ def analyze_texts(papers: dict,
                   chunk_chars: int = 12000,
                   overlap_chars: int = 500,
                   delay_ms: int = 0,
-                  min_confidence: float = 0.6,
+                  min_confidence: float = 0.0,
                   require_mut_quote: bool = True,
                   llm_meta: dict | None = None,
                   paper_pause_sec: float | None = None) -> Dict[str, Dict]:
@@ -132,9 +132,18 @@ def analyze_texts(papers: dict,
 
         debug_override = meta.pop("debug_raw", None) if "debug_raw" in meta else None
         capture_raw = SAVE_RAW_LLM or _is_truthy(debug_override)
+        
+        # Re-add debug_raw to meta so LLM backend can capture raw responses
+        if capture_raw:
+            meta["debug_raw"] = True
 
         # Run LLM extraction
         raw = run_on_paper(text, meta=meta)
+        
+        # Extract raw LLM responses if available (before cleaning/conversion)
+        raw_llm_responses = None
+        if isinstance(raw, dict) and "_raw_llm_responses" in raw:
+            raw_llm_responses = raw.pop("_raw_llm_responses")
 
         # Clean and ground results - NOW applies min_confidence BEFORE final scoring
         cleaned = clean_and_ground(
@@ -155,8 +164,8 @@ def analyze_texts(papers: dict,
             "result": cleaned,
         }
         
-        if capture_raw:
-            results[pmid]["raw_llm"] = raw
+        if capture_raw and raw_llm_responses:
+            results[pmid]["raw_llm"] = raw_llm_responses
 
         # Gentle pacing between papers
         if paper_pause_sec and paper_pause_sec > 0:
