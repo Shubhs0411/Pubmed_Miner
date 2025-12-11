@@ -28,6 +28,15 @@ A Sequence Feature (SF) is any amino-acid feature with biological significance:
 • signals (NLS/NES/cleavage sites) tied to function/phenotype
 
 **CRITICAL**: Extract ALL structural regions even if they have NO mutation or variant. A domain description with coordinates IS a sequence feature.
+**CRITICAL RESTRICTION**: Extract ONLY features from VIRAL proteins of the organism being studied. 
+DO NOT extract features from:
+- Host proteins (human, mouse, cell line proteins)
+- Bacterial proteins
+- Proteins from other organisms
+- Host factors or cellular proteins that interact with viral proteins
+
+If a protein interaction is described (e.g., "viral protein X binds human protein Y"), 
+extract ONLY the viral protein's feature, NOT the host protein.
 
 PATTERN RECOGNITION GUIDE
 Systematically scan the text for these patterns. Extract ALL instances you find:
@@ -69,6 +78,14 @@ Systematically scan the text for these patterns. Extract ALL instances you find:
 • Sequence motifs: "HExxH motif", "ATLG motif", "GxGxxG motif"
 • Pattern descriptions: "conserved sequence ATLG", "motif pattern HExxH", "signature sequence"
 • Short sequences: 3-10 uppercase letters, possibly with x/X for variable positions
+
+**Viral Protein Verification:**
+- Influenza A: HA, NA, NP, M1, M2, NS1, NS2, PA, PB1, PB2, PB1-F2
+- Chikungunya: E1, E2, E3, Capsid, nsP1, nsP2, nsP3, nsP4
+- Dengue: E, prM, C, NS1, NS2A, NS2B, NS3, NS4A, NS4B, NS5
+- SARS-CoV-2: Spike (S), Envelope (E), Membrane (M), Nucleocapsid (N), ORF1ab, NSP1-16
+- ALWAYS verify protein is viral before extraction
+- REJECT: PIK3C3, Bcl2, Becn1, STAT1, IRF3, TLR, MAVS, etc. (host proteins)
 
 **Coverage Strategy:**
 1. First pass: Systematically scan the ENTIRE text for ALL patterns listed above
@@ -264,9 +281,16 @@ INSTRUCTIONS
 • Set motif_pattern for sequence motifs (e.g., "HExxH", "ATLG"); else null.
 • When interactions between proteins are described, populate the interactions block; otherwise set each field to null.
 • **NO MISSING PATTERNS**: If you see a mutation pattern (in any format), a protein mention, a residue number, or a domain description, you MUST extract it. Do not skip patterns due to format variations.
+•  **VIRAL PROTEINS ONLY**: Verify the protein belongs to the virus being studied (e.g., E1, E2, NS1, NS3, Capsid, Envelope, etc.). 
+  Do NOT extract host/cellular proteins like PIK3C3, Bcl2, STAT1, IRF3, etc.
+  Common viral protein patterns: E1-E2, NS1-NS5, M1-M2, HA, NA, NP, PA, PB1, PB2, Capsid, Envelope, Glycoprotein, Polyprotein.
+  
+•  **REQUIRE EITHER**: (1) A mutation/variant with coordinates OR (2) A structural domain/region with coordinates.
+  Do NOT extract vague interaction descriptions without viral protein features.
 
 TEXT
 {TEXT}
+
 """
 
 
