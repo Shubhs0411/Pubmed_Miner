@@ -14,7 +14,7 @@ from services.pubmed import (
     esearch_reviews, esearch_all, esummary, parse_pubdate_interval, overlaps
 )
 from pipeline.batch_analyze import fetch_all_fulltexts, analyze_texts
-from pipeline.csv_export import flatten_to_rows
+from pipeline.simple_csv import raw_to_csv
 
 # Import prompts for editing
 from llm.prompts import PROMPTS
@@ -295,7 +295,7 @@ def main():
     if st.session_state.get("hits_df"):
         st.markdown("### Results")
         df_hits = pd.DataFrame(st.session_state["hits_df"])
-        st.dataframe(df_hits, width='stretch', use_container_width=True)
+        st.dataframe(df_hits, use_container_width=True)
         st.download_button(
             "⬇️ Download Results (.csv)", 
             data=df_hits.to_csv(index=False).encode("utf-8"), 
@@ -418,8 +418,6 @@ def main():
         
         prog = st.progress(0, text="Starting LLM extraction…")
         log_box = st.empty()
-        st.markdown("### Extraction Results")
-        table_box = st.empty()
         
         llm_meta = {
             "model_choice": model_choice,
@@ -453,15 +451,13 @@ def main():
                     overlap_chars=500,
                     delay_ms=400, 
                     min_confidence=0.0, 
-                    require_mut_quote=True,
+                    require_mut_quote=False,  # No filtering
                     llm_meta=llm_meta,
                 )
                 
                 batch_results.update(single_dict)
                 _persist("batch_results", batch_results)
-                
-                out_df_partial = flatten_to_rows(batch_results)
-                table_box.dataframe(out_df_partial, width='stretch', use_container_width=True)
+                        
             except Exception as e:
                 err_line = f"   ↳ ERROR on PMID {pmid}: {e}"
                 llm_log.append(err_line)
@@ -471,26 +467,169 @@ def main():
             prog.progress(int(i * 100 / total), text=f"Progress: {i}/{total}")
         
         st.success("✅ LLM extraction complete!")
+    
+    # CSV Export section (always visible if results exist, updates when filter toggle changes)
+    if st.session_state.get("batch_results"):
+        st.markdown("### CSV Export")
         
-        # Final results
-        out_df = flatten_to_rows(st.session_state.get("batch_results", {}))
-        table_box.dataframe(out_df, width='stretch', use_container_width=True)
+        apply_filters = st.checkbox(
+            "Apply Filters", 
+            value=True,
+            help="When enabled: Skip rows with feature name but no position, and skip empty rows. When disabled: Show all rows.",
+            key="csv_filter_toggle"
+        )
         
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button(
-                "⬇️ Download Findings (.csv)", 
-                data=out_df.to_csv(index=False).encode("utf-8"), 
-                file_name="pubmed_findings.csv", 
-                mime="text/csv"
-            )
-        with col2:
+        # Convert to CSV and display (updates when toggle changes)
+        csv_df = raw_to_csv(st.session_state.get("batch_results", {}), apply_filters=apply_filters)
+        
+        if not csv_df.empty:
+            st.dataframe(csv_df, use_container_width=True)
+            st.info(f"Showing {len(csv_df)} rows ({'filtered' if apply_filters else 'unfiltered'})")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    "⬇️ Download CSV (.csv)", 
+                    data=csv_df.to_csv(index=False).encode("utf-8"), 
+                    file_name="raw_llm_output.csv", 
+                    mime="text/csv"
+                )
+            with col2:
+                st.download_button(
+                    "⬇️ Download Raw JSON (.json)", 
+                    data=json.dumps(st.session_state["batch_results"], ensure_ascii=True, indent=2).encode("utf-8"), 
+                    file_name="raw_llm_output.json", 
+                    mime="application/json"
+                )
+        else:
+            st.info("No features extracted.")
             st.download_button(
                 "⬇️ Download Raw JSON (.json)", 
                 data=json.dumps(st.session_state["batch_results"], ensure_ascii=True, indent=2).encode("utf-8"), 
-                file_name="pubmed_results.json", 
+                file_name="raw_llm_output.json", 
                 mime="application/json"
             )
+    
+    # Section 4: Validation (Optional)
+    st.markdown("---")
+    st.markdown("### Section 4: Validation (Optional)")
+    
+    uploaded_file = st.file_uploader(
+        "Upload Ground Truth CSV",
+        type=["csv"],
+        help="Upload a CSV file with ground truth data. Quotes will be matched against LLM output."
+    )
+    
+    if uploaded_file is not None and st.session_state.get("batch_results"):
+        try:
+            # Read ground truth CSV
+            gt_df = pd.read_csv(uploaded_file)
+            
+            # Check if required columns exist
+            required_cols = ["pmid", "quote"]
+            if not all(col in gt_df.columns for col in required_cols):
+                st.error(f"Ground truth CSV must contain columns: {', '.join(required_cols)}")
+            else:
+                # Extract LLM quotes from batch_results
+                llm_quotes = []
+                for pmid, entry in st.session_state.get("batch_results", {}).items():
+                    if entry.get("status") != "ok":
+                        continue
+                    result = entry.get("result", {})
+                    features = result.get("sequence_features", [])
+                    for feat in features:
+                        if not isinstance(feat, dict):
+                            continue
+                        quote = (feat.get("evidence_snippet") or "").strip()
+                        if quote:
+                            llm_quotes.append({
+                                "pmid": pmid,
+                                "quote": quote,
+                                "virus": (feat.get("virus") or "").strip(),
+                                "protein": (feat.get("protein") or "").strip(),
+                            })
+                
+                if not llm_quotes:
+                    st.info("No quotes found in LLM output.")
+                else:
+                    # Simple quote matching using text similarity
+                    from difflib import SequenceMatcher
+                    
+                    matches = []
+                    matched_gt_quotes = set()
+                    
+                    for _, gt_row in gt_df.iterrows():
+                        gt_pmid = str(gt_row.get("pmid", "")).strip()
+                        gt_quote = str(gt_row.get("quote", "")).strip()
+                        
+                        if not gt_quote:
+                            continue
+                        
+                        # Find best matching LLM quote for this ground truth quote
+                        best_match = None
+                        best_score = 0.0
+                        
+                        for llm_item in llm_quotes:
+                            # Only match if PMID matches (if available in GT)
+                            if gt_pmid and str(llm_item["pmid"]) != gt_pmid:
+                                continue
+                            
+                            llm_quote = llm_item["quote"]
+                            # Calculate similarity
+                            similarity = SequenceMatcher(None, gt_quote.lower(), llm_quote.lower()).ratio()
+                            
+                            if similarity > best_score:
+                                best_score = similarity
+                                best_match = {
+                                    "gt_quote": gt_quote,  # From uploaded CSV (ground truth)
+                                    "llm_quote": llm_quote,  # From LLM extraction
+                                    "similarity": similarity,
+                                    "pmid": llm_item["pmid"],
+                                    "virus": llm_item.get("virus", ""),
+                                    "protein": llm_item.get("protein", ""),
+                                }
+                        
+                        if best_match and best_score > 0.3:  # Threshold for matching
+                            matches.append(best_match)
+                            matched_gt_quotes.add(gt_quote)
+                    
+                    # Find unmatched ground truth quotes
+                    unmatched = []
+                    for _, gt_row in gt_df.iterrows():
+                        gt_quote = str(gt_row.get("quote", "")).strip()
+                        if gt_quote and gt_quote not in matched_gt_quotes:
+                            unmatched.append({
+                                "quote": gt_quote,
+                                "pmid": str(gt_row.get("pmid", "")).strip(),
+                            })
+                    
+                    # Display results - compact format
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.metric("Matched", len(matches))
+                        if matches:
+                            for i, match in enumerate(matches[:5], 1):  # Show max 5 matches
+                                st.caption(f"**{i}.** {match['gt_quote'][:80]}...")
+                                st.caption(f"   → {match['llm_quote'][:80]}... ({match['similarity']:.0%})")
+                            if len(matches) > 5:
+                                st.caption(f"... and {len(matches) - 5} more")
+                    
+                    with col2:
+                        st.metric("Unmatched", len(unmatched))
+                        if unmatched:
+                            for i, item in enumerate(unmatched[:5], 1):  # Show max 5 unmatched
+                                st.caption(f"**{i}.** {item['quote'][:100]}...")
+                            if len(unmatched) > 5:
+                                st.caption(f"... and {len(unmatched) - 5} more")
+                    
+                    if not matches and not unmatched:
+                        st.info("No quotes found in ground truth file.")
+                        
+        except Exception as e:
+            st.error(f"Error processing ground truth file: {e}")
+    elif uploaded_file is not None:
+        st.warning("Please run LLM extraction first to compare with ground truth.")
 
 
 if __name__ == "__main__":

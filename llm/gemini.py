@@ -252,6 +252,7 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         seen.add(k)
         uniq.append(f)
 
+    # Return raw normalized output (no filtering/cleaning)
     raw = {
         "paper": {
             "pmid": pmid, 
@@ -260,22 +261,15 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
             "virus_candidates": [], 
             "protein_candidates": []
         },
-        "sequence_features": uniq,
+        "sequence_features": uniq,  # Normalized but not filtered
         "scan_candidates": scan_candidates,
     }
-
-    cleaned = utils.clean_and_ground(
-        raw, text_norm,
-        restrict_to_paper=True,
-        require_mutation_in_quote=False,
-        min_confidence=float(meta.get("min_confidence") or 0.0),
-    )
     
     # Include raw LLM responses if debug mode is enabled
     if capture_raw and raw_llm_responses:
-        cleaned["_raw_llm_responses"] = raw_llm_responses
+        raw["_raw_llm_responses"] = raw_llm_responses
     
-    return cleaned
+    return raw
 
 
 # Re-export clean_and_ground from utils for backward compatibility

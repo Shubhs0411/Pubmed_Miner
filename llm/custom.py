@@ -357,15 +357,8 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         "scan_candidates": scan_candidates,
     }
 
-    cleaned = utils.clean_and_ground(
-        raw_output,
-        text_norm,
-        restrict_to_paper=True,
-        require_mutation_in_quote=False,
-        min_confidence=float(meta.get("min_confidence") or 0.0),
-    )
-
-    return cleaned
+    # Return raw normalized output (no filtering/cleaning)
+    return raw_output
 
 
 # Re-export clean_and_ground for parity with other backends

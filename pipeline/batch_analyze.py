@@ -7,9 +7,8 @@ from typing import Dict, List
 
 import pandas as pd
 
-from llm.unified import run_on_paper, clean_and_ground
+from llm.unified import run_on_paper
 from services.pmc import get_pmc_fulltext_with_meta, get_last_fetch_source
-from pipeline.csv_export import flatten_to_rows
 
 
 def _is_truthy(value) -> bool:
@@ -137,31 +136,24 @@ def analyze_texts(papers: dict,
         if capture_raw:
             meta["debug_raw"] = True
 
-        # Run LLM extraction
+        # Run LLM extraction - return raw output only
         raw = run_on_paper(text, meta=meta)
         
-        # Extract raw LLM responses if available (before cleaning/conversion)
+        # Extract raw LLM responses if available
         raw_llm_responses = None
         if isinstance(raw, dict) and "_raw_llm_responses" in raw:
             raw_llm_responses = raw.pop("_raw_llm_responses")
 
-        # Clean and ground results - NOW applies min_confidence BEFORE final scoring
-        cleaned = clean_and_ground(
-            raw,
-            text,
-            restrict_to_paper=True,
-            require_mutation_in_quote=require_mut_quote,
-            min_confidence=min_confidence,
-        )
+        # Add title to paper info
+        if isinstance(raw, dict) and "paper" in raw:
+            raw["paper"]["title"] = title
 
-        if "paper" in cleaned:
-            cleaned["paper"]["title"] = title
-
+        # Return raw LLM output without any filtering/processing
         results[pmid] = {
             "status": "ok",
             "pmcid": pmcid,
             "title": title,
-            "result": cleaned,
+            "result": raw,  # Raw LLM output, no filtering
         }
         
         if capture_raw and raw_llm_responses:
