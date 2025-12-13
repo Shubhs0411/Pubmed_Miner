@@ -264,7 +264,7 @@ def run_on_paper(paper_text: str, meta: Optional[Dict[str, Any]] = None) -> Dict
         "sequence_features": uniq,  # Normalized but not filtered
         "scan_candidates": scan_candidates,
     }
-    
+
     # Include raw LLM responses if debug mode is enabled
     if capture_raw and raw_llm_responses:
         raw["_raw_llm_responses"] = raw_llm_responses

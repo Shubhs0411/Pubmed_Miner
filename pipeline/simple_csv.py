@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import re
 
+from llm.utils import expand_to_sentence
+
 
 def _extract_position_from_feature(feature_obj: Dict) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     """Extract start, end, or single position from feature object."""
@@ -60,9 +62,14 @@ def _format_position(start: Optional[int], end: Optional[int], single: Optional[
     return ""
 
 
-def raw_to_csv(batch: Dict[str, Dict], apply_filters: bool = True) -> pd.DataFrame:
+def raw_to_csv(batch: Dict[str, Dict], apply_filters: bool = True, papers: Optional[Dict[str, Dict]] = None) -> pd.DataFrame:
     """
     Convert raw LLM output to CSV format matching ground truth.
+    
+    Args:
+        batch: Dict[pmid] = {status, pmcid, title, result}
+        apply_filters: Whether to apply filtering rules
+        papers: Optional dict[pmid] = {text, ...} for quote expansion
     
     Rules:
     1. If sequence feature name exists but NO position (start/end), skip row
@@ -90,6 +97,15 @@ def raw_to_csv(batch: Dict[str, Dict], apply_filters: bool = True) -> pd.DataFra
             
             feature_name = (feature_obj.get("name_or_label") or "").strip()
             quote = (feat.get("evidence_snippet") or "").strip()
+            
+            # Expand quote to full sentence if full text is available
+            if quote and papers and pmid in papers:
+                full_text = papers[pmid].get("text", "")
+                if full_text:
+                    expanded = expand_to_sentence(full_text, quote)
+                    if expanded:
+                        quote = expanded
+            
             virus = (feat.get("virus") or "").strip()
             protein = (feat.get("protein") or "").strip()
             

@@ -480,7 +480,11 @@ def main():
         )
         
         # Convert to CSV and display (updates when toggle changes)
-        csv_df = raw_to_csv(st.session_state.get("batch_results", {}), apply_filters=apply_filters)
+        csv_df = raw_to_csv(
+            st.session_state.get("batch_results", {}), 
+            apply_filters=apply_filters,
+            papers=st.session_state.get("batch_papers")  # For quote expansion
+        )
         
         if not csv_df.empty:
             st.dataframe(csv_df, use_container_width=True)

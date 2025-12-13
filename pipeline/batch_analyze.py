@@ -131,14 +131,14 @@ def analyze_texts(papers: dict,
 
         debug_override = meta.pop("debug_raw", None) if "debug_raw" in meta else None
         capture_raw = SAVE_RAW_LLM or _is_truthy(debug_override)
-        
+
         # Re-add debug_raw to meta so LLM backend can capture raw responses
         if capture_raw:
             meta["debug_raw"] = True
 
         # Run LLM extraction - return raw output only
         raw = run_on_paper(text, meta=meta)
-        
+
         # Extract raw LLM responses if available
         raw_llm_responses = None
         if isinstance(raw, dict) and "_raw_llm_responses" in raw:
