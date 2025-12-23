@@ -93,7 +93,6 @@ def raw_to_csv(batch: Dict[str, Dict], apply_filters: bool = True, papers: Optio
                 continue
             
             feature_obj = feat.get("feature", {})
-            confidence_obj = feat.get("confidence", {})
             
             feature_name = (feature_obj.get("name_or_label") or "").strip()
             quote = (feat.get("evidence_snippet") or "").strip()
@@ -143,13 +142,6 @@ def raw_to_csv(batch: Dict[str, Dict], apply_filters: bool = True, papers: Optio
                 else:
                     target_type = "domain"
             
-            # Get confidence
-            confidence = 0.0
-            try:
-                confidence = float(confidence_obj.get("score_0_to_1", 0.0))
-            except (ValueError, TypeError):
-                pass
-            
             feature_data.append({
                 "pmid": pmid,
                 "pmcid": pmcid,
@@ -162,7 +154,6 @@ def raw_to_csv(batch: Dict[str, Dict], apply_filters: bool = True, papers: Optio
                 "single_pos": single_pos,
                 "quote": quote,
                 "target_type": target_type,
-                "confidence": confidence,
             })
     
     # Second pass: Group features by (pmid, virus, protein, quote)
@@ -186,7 +177,6 @@ def raw_to_csv(batch: Dict[str, Dict], apply_filters: bool = True, papers: Optio
         pmcid = group[0]["pmcid"]
         title = group[0]["title"]
         target_type = group[0]["target_type"]  # Assume same type for grouped features
-        confidence = group[0]["confidence"]  # Use first confidence
         
         # Collect feature names and positions
         feature_names = []
@@ -253,7 +243,6 @@ def raw_to_csv(batch: Dict[str, Dict], apply_filters: bool = True, papers: Optio
             "position": position_str,
             "quote": quote,
             "target_type": target_type,
-            "confidence": confidence,
         }
         rows.append(row)
     
@@ -262,5 +251,14 @@ def raw_to_csv(batch: Dict[str, Dict], apply_filters: bool = True, papers: Optio
 
 
 __all__ = ["raw_to_csv"]
+
+
+
+
+
+
+
+
+
 
 

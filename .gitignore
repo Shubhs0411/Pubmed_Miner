@@ -101,6 +101,7 @@ tmp/
 # Data and cache directories
 cache/
 data/
+output/
 *.csv
 *.json
 *.xlsx

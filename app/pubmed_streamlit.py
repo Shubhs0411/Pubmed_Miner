@@ -4,6 +4,7 @@ from __future__ import annotations
 import os, json, io, zipfile
 import re
 from datetime import date, datetime
+from pathlib import Path
 import calendar
 import pandas as pd
 import streamlit as st
@@ -143,16 +144,35 @@ def sanitize_filename(name: str) -> str:
     return name
 
 
-def generate_output_filename(disease_name: Optional[str] = None) -> str:
-    """Generate output filename: disease_LLM_findings_timestamp.csv"""
+def ensure_output_dir() -> str:
+    """Ensure output directory exists and return its path."""
+    output_dir = Path("output")
+    output_dir.mkdir(exist_ok=True)
+    return str(output_dir)
+
+
+def generate_output_filename(disease_name: Optional[str] = None, for_download: bool = False) -> str:
+    """Generate output filename: output/disease_LLM_findings_timestamp.csv
+    
+    Args:
+        disease_name: Name of the disease
+        for_download: If True, return just filename (for Streamlit download). If False, return full path.
+    """
+    output_dir = ensure_output_dir()
+    
     if disease_name:
         sanitized = sanitize_filename(disease_name)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{sanitized}_LLM_findings_{timestamp}.csv"
+        filename = f"{sanitized}_LLM_findings_{timestamp}.csv"
     else:
         # Fallback to default
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"output_LLM_findings_{timestamp}.csv"
+        filename = f"output_LLM_findings_{timestamp}.csv"
+    
+    if for_download:
+        return filename  # Just filename for download button
+    else:
+        return str(Path(output_dir) / filename)  # Full path for saving
 
 
 def main():
@@ -288,7 +308,7 @@ def main():
     # Query input tabs
     query_tab1, query_tab2, query_tab3 = st.tabs(["✨ Natural Language", "⚙️ PubMed Query", "🦠 Disease Name"])
     
-            with query_tab1:
+    with query_tab1:
         nl_query = st.text_area(
             "Enter your research question",
             height=100,
@@ -351,7 +371,6 @@ def main():
             st.session_state["query_to_search"] = constructed_query
             st.session_state["disease_name"] = disease_name.strip()
             st.session_state["query_type"] = "disease"
-            st.info(f"**Constructed Query:** `{constructed_query}`")
     
     # Display current query
     query = st.session_state.get("query_to_search", "")
@@ -652,11 +671,24 @@ def main():
             st.dataframe(csv_df, use_container_width=True)
             st.info(f"Showing {len(csv_df)} rows ({'filtered' if apply_filters else 'unfiltered'})")
             
+            # Generate filenames based on disease name
+            disease_name = st.session_state.get("disease_name") or st.session_state.get("extracted_disease_name")
+            csv_filepath = generate_output_filename(disease_name, for_download=False)
+            csv_filename = generate_output_filename(disease_name, for_download=True)
+            json_filepath = csv_filepath.replace(".csv", ".json")
+            json_filename = csv_filename.replace(".csv", ".json")
+            
+            # Save CSV to output folder
+            csv_df.to_csv(csv_filepath, index=False)
+            st.success(f"💾 CSV saved to: `{csv_filepath}`")
+            
+            # Save JSON to output folder
+            with open(json_filepath, 'w', encoding='utf-8') as f:
+                json.dump(st.session_state["batch_results"], f, ensure_ascii=True, indent=2)
+            st.success(f"💾 JSON saved to: `{json_filepath}`")
+            
             col1, col2 = st.columns(2)
             with col1:
-                # Generate filename based on disease name
-                disease_name = st.session_state.get("disease_name") or st.session_state.get("extracted_disease_name")
-                csv_filename = generate_output_filename(disease_name)
                 st.download_button(
                     "⬇️ Download CSV (.csv)", 
                     data=csv_df.to_csv(index=False).encode("utf-8"), 
@@ -664,9 +696,6 @@ def main():
                     mime="text/csv"
                 )
             with col2:
-                # Generate JSON filename based on disease name
-                disease_name = st.session_state.get("disease_name") or st.session_state.get("extracted_disease_name")
-                json_filename = generate_output_filename(disease_name).replace(".csv", ".json")
                 st.download_button(
                     "⬇️ Download Raw JSON (.json)", 
                     data=json.dumps(st.session_state["batch_results"], ensure_ascii=True, indent=2).encode("utf-8"), 
@@ -676,7 +705,14 @@ def main():
         else:
             st.info("No features extracted.")
             disease_name = st.session_state.get("disease_name") or st.session_state.get("extracted_disease_name")
-            json_filename = generate_output_filename(disease_name).replace(".csv", ".json")
+            json_filepath = generate_output_filename(disease_name, for_download=False).replace(".csv", ".json")
+            json_filename = generate_output_filename(disease_name, for_download=True).replace(".csv", ".json")
+            
+            # Save JSON to output folder even if no CSV
+            with open(json_filepath, 'w', encoding='utf-8') as f:
+                json.dump(st.session_state["batch_results"], f, ensure_ascii=True, indent=2)
+            st.success(f"💾 JSON saved to: `{json_filepath}`")
+            
             st.download_button(
                 "⬇️ Download Raw JSON (.json)", 
                 data=json.dumps(st.session_state["batch_results"], ensure_ascii=True, indent=2).encode("utf-8"), 

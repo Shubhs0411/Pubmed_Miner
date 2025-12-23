@@ -6,7 +6,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 
 # Import and run the main function from the modular app
-from app.app import main
+from app.pubmed_streamlit import main
 
 if __name__ == "__main__":
     main()
